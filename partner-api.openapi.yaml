@@ -1,0 +1,2381 @@
+openapi: 3.1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CityLockers Partner API — Direction A (inbound), the contract.
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH for the partner-facing surface of the
+# `partner-bridge` Supabase Edge Function. It is authored BY HAND from the code
+# (supabase/functions/partner-bridge/index.ts plus the `partner.*` and
+# `booking.*` RPCs it calls) and reconciled against a live end-to-end exercise
+# of all eleven endpoints on the dev branch project (2026-08-15). Where the code
+# and the live run disagreed, THE LIVE OBSERVATION WON and the disagreement is
+# recorded in the description below and in `x-observed` on the affected
+# responses.
+#
+# It describes the API AS IT BEHAVES, not as it would ideally be shaped. No
+# reason string has been renamed for tidiness; no route has been made more
+# RESTful. Phase 4 generates the Postman collection, the rendered docs and the
+# drift guard FROM THIS FILE — none of those are in scope here.
+#
+# Validation: `npm run spec:validate`
+# (@seriousme/openapi-schema-validator, pinned; see package.json).
+# ─────────────────────────────────────────────────────────────────────────────
+
+info:
+  title: CityLockers Partner API (Direction A, inbound)
+  version: 1.0.0
+  summary: >-
+    Sell CityLockers locker capacity from your own product: discover locations,
+    price a window, create and manage bookings, and hand your customer an access
+    code.
+  description: |
+    The Direction A partner API lets a partner sell CityLockers locker capacity
+    inside its own product. Every call is authenticated with a partner API key,
+    every result is scoped to the partner that key belongs to, and every response
+    — success or failure — uses the same envelope.
+
+    ## The envelope
+
+    Every response body is a JSON object carrying `ok`.
+
+    * `ok: true` — the operation succeeded. The rest of the object is the
+      operation's payload.
+    * `ok: false` — the operation was refused. `reason` is always present and is
+      a machine-readable string from the vocabulary under *Reason codes*.
+      `error` is sometimes
+      present and is a human-readable sentence; **branch on `reason`, never on
+      `error`**, and never on the HTTP status alone.
+
+    There is no separate error object and no `errors` array. A refusal is never
+    delivered as a bare HTTP status with an empty body.
+
+    ## Getting started
+
+    1. **Ask your CityLockers contact for a partner API key.** Keys are issued by
+       us; there is no self-service signup. The key is what defines which
+       locations you may sell, which operations you may call, and which booking
+       windows you are allowed to offer.
+    2. **Call `GET /bootstrap` once, at startup, and configure your UI from what
+       it returns** — your locations, the locker sizes offered at each, your
+       period policy, your granted operations, and the mode of the key you hold.
+       **Do not hard-code any of it.** Every one of those is a property of the
+       key and can change without a release on your side.
+    3. **Price a window with `GET /quote` and check stock with `GET
+       /availability`** before you show a price or a "book" button. Neither
+       creates anything.
+    4. **Create the booking with `POST /bookings`,** carrying an
+       `Idempotency-Key`. You get back a booking `reference` and, where one
+       exists, the customer's `access_code`.
+    5. **Manage it afterwards** with `GET /booking`, `POST /extend`,
+       `POST /cancel`, `POST /end`, `POST /resend-code` and
+       `POST /reissue-code`.
+
+    **There is one host and it is production.** A `test` key mode exists in the
+    data model, but the partner sandbox it refers to **has not been built**, so
+    no `test` key can currently be issued and every key you are given is `live`
+    against real lockers, real money and real customer notifications. Ask for a
+    throwaway location rather than assuming a safe environment exists.
+
+    **Keep the key on your server.** Never put it in a browser, a mobile app, a
+    URL or a repository. It is a bearer credential: whoever holds it is you.
+
+    ## The flow, in order
+
+    ```
+    bootstrap ──▶ availability ──▶ quote ──▶ create ──▶ (extend | cancel | end)
+       once          per search     per      per            per booking
+     at startup                    window   basket
+    ```
+
+    `bootstrap` is a startup call, not a per-request one. `availability` and
+    `quote` answer different questions and neither is authoritative: **create is
+    the only gate**. A window `availability` happily counts and `quote` happily
+    prices can still be refused by create — `period_not_allowed` if it falls
+    outside your key's period policy, `unavailable` if a concurrent booking took
+    the compartment first, `invalid` if it is under the engine's real floor.
+    Treat a create refusal as normal control flow, not as an exception.
+
+    ## Routing: dispatch on the trailing path segment
+
+    The API is one Edge Function invoked at `/partner-bridge`. The sub-route is
+    the **trailing path segment** of the request URL, and the method then selects
+    the operation (`GET /bookings` lists, `POST /bookings` creates). This is
+    described here faithfully rather than reshaped.
+
+    Two consequences a generated client must respect:
+
+    1. **A bare `POST` with no path segment resolves to `bookings` (create).**
+       `POST /partner-bridge` and `POST /partner-bridge/bookings` are the same
+       operation. This is documented below as the path `/` and was proven live —
+       a real second booking was created through a request with no trailing
+       segment at all. It is an alias, not a twelfth endpoint.
+    2. **An unrecognised segment, or a recognised segment with the wrong method,
+       returns `404 not_found`** — the same reason string a missing booking
+       reference produces. A 404 therefore does not by itself mean "no such
+       booking".
+
+    ## Authentication
+
+    `Authorization: Bearer <key>` on every call, including the ones that can fail
+    before the key is checked (see the create endpoint's security note).
+
+    A raw key is `kpk_<mode>_<8hex>_<64hex>`, e.g.
+    `kpk_live_1a2b3c4d_<64 hex characters>`. Only the fourth segment is secret.
+    The first three segments together are the key's non-secret **prefix**
+    (`kpk_live_1a2b3c4d`); it is what the server stores alongside the SHA-256
+    hash of the full key, what the rate limiter buckets on, and the only part
+    safe to quote in a support ticket or a log line.
+
+    `mode` is a property of the key itself, `live` or `test`, and is the source
+    of truth for which environment the credential belongs to. It is surfaced to
+    you on `GET /bootstrap` as the top-level `mode` field. Only `live` keys are
+    minted today; the `test` sandbox is a separate, not-yet-built partner
+    environment, so a `test` key cannot currently be issued.
+
+    **Legacy two-segment keys (`kpk_<8hex>_<64hex>`) no longer authenticate.**
+    Verification derives the prefix from the first three segments, so a
+    two-segment key yields a prefix that matches no stored row and is rejected
+    as `unauthorized`.
+
+    Verification hashes the full raw key with SHA-256 and constant-time compares
+    it against the stored hash, scoped to an **active key belonging to an active
+    partner**. Anything else — no key, malformed key, revoked key, suspended
+    partner — is `401 unauthorized`.
+
+    ## Rate limiting
+
+    60 requests per minute per key prefix, over-limit → `429 rate_limited`. The
+    limiter is an in-process token bucket: it resets when the function instance
+    cold-starts and is not shared across instances, so the effective limit is a
+    floor, not a guarantee. Treat 429 as retryable with backoff. This behaviour
+    is expected to be replaced by a durable shared counter; do not build a client
+    that depends on the current leniency.
+
+    ## Idempotency
+
+    `Idempotency-Key` is **required on the two operations that move money**:
+    `POST /bookings` (create) and `POST /extend`. It is not read on any other
+    endpoint. A missing or blank header is `400 invalid` before any work is done.
+
+    Replaying a key that has already been used returns the earlier request's
+    outcome instead of acting twice.
+
+    **A replay returns LIVE CURRENT STATE, not a frozen echo of the original
+    response.** This is the single most important thing to understand about
+    replay on this API, and it was proven live: a create replayed after the
+    booking had been extended and then cancelled came back with
+    `status: "cancelled"` and `total: 18`, where the original create had returned
+    `status: "active"` and `total: 9`. The create replay branch re-reads the
+    booking and customer rows at replay time. So on a create replay,
+    `status`, `total` and `access_code` describe the booking **now**;
+    only `reference` and `replayed: true` are stable facts about the original
+    request. (`POST /extend` differs: its replay returns the stored result
+    object of the original extension, stamped `replayed: true`.)
+
+    A replay of a request that was *rejected* returns the original rejection
+    reason with the original status. A replay that arrives while the first
+    request is still in flight returns `409 in_progress`.
+
+    ## Booking windows: two shapes, and a floor that is not where you expect
+
+    **Send either `duration_minutes` or `end_time`, not both.** They are
+    alternative spellings of the same window and create accepts both:
+
+    * `duration_minutes` — an integer count of minutes from `start_time`. If you
+      send both fields, **`duration_minutes` wins** and `end_time` is ignored.
+    * `end_time` — an ISO-8601 instant. The window is then derived from
+      `start_time` (or from now, if you omit `start_time`).
+
+    Omit `start_time` to mean "now". `GET /availability` and `GET /quote` take
+    only `duration_minutes`, so if your UI works in end times you convert before
+    you price.
+
+    **The floor is 180 minutes, not the 60 the edge function accepts.** This is
+    the single most common way a first integration fails, and it fails *late*:
+    the edge function rejects anything under 60 minutes outright, but the booking
+    engine's smallest chip is **180 minutes**, so a 60–179 minute request passes
+    edge validation, reaches the engine, and comes back `400 invalid` with no
+    hint that duration was the problem. **If you offer sub-3-hour windows in your
+    UI, they will all fail.** Above a day, the window must be a whole number of
+    1440-minute blocks or it is `invalid_duration`.
+
+    ## Reason codes, and why they are documented per endpoint
+
+    The full reason vocabulary the code can emit is:
+
+    | reason | usual status | meaning |
+    |---|---|---|
+    | `unauthorized` | 401, sometimes 403 | no usable key, or the partner is not active |
+    | `capability` | 403 | the partner lacks the *inbound* direction capability |
+    | `out_of_scope` | 403 | the location is not in this key's scope |
+    | `not_permitted` | 403 | the partner is not granted this operation |
+    | `not_found` | 404 | no such booking for this partner, or no such route |
+    | `unavailable` | 409 | nothing free / nothing priceable for the request |
+    | `in_progress` | 409 | a concurrent replay of the same Idempotency-Key |
+    | `invalid_state` | 409 | the booking is not in a state this operation accepts |
+    | `window_not_expired` | 409 | see the note below — **unreachable today** |
+    | `invalid` | 400 | malformed or missing input |
+    | `invalid_duration` | 400 | the duration is structurally wrong |
+    | `period_not_allowed` | 400 | the partner's period policy forbids this window |
+    | `rate_limited` | 429 | over the per-key request budget |
+    | `server_error` | 500 | an internal failure; retry is reasonable |
+
+    **`reason` alone does not determine the HTTP status, which is why this spec
+    models reason→status per endpoint per branch instead of publishing one global
+    table.** The concrete case: `unauthorized` is **401** when it comes from a
+    route's own key-verification branch (the common case — no key, bad key), and
+    **403** when it is returned by a wrapper RPC's *partner-not-active* branch
+    and mapped by the generic reason→status mapper. The two have never been
+    observed colliding, because key verification already scopes to an active
+    partner, so the 403 flavour is only reachable if a partner is deactivated in
+    the window between verification and the operation's own read. It is
+    nonetheless a real branch in shipped code, and a client keyed on a single
+    global `reason`→status table will mis-handle it. Each operation below lists
+    only the reasons that operation can actually produce, and each response says
+    which branch produces it.
+
+    Two further notes on the enum:
+
+    * **`window_not_expired` is unreachable.** It is documented here for
+      completeness of the vocabulary only. The window-expiry guard on ending a
+      booking was **deleted** in migration `20260728140000_end_booking_early.sql`,
+      whose own header records that the reason string was left in the status maps
+      deliberately, to avoid needless API churn. `POST /end` completes a live
+      booking immediately, before its window closes — proven live. It is **not**
+      listed as a response of `POST /end` anywhere in this document, and it will
+      only become reachable if that deleted guard is reinstated.
+    * **`period_not_allowed` is real and was missing from the earlier written
+      accounts of this API.** `POST /bookings` returns it (as a `400`) when the
+      requested window falls outside the partner's own intraday/multiday policy.
+
+    ## Grant vocabulary
+
+    A key's partner holds a set of granted operations. `GET /bootstrap` returns
+    them as `granted_operations`, an array of objects — `{ key, kind, label }`,
+    **not** an array of bare strings. The `key` values are the grant keys, and
+    each callable endpoint below names the one it requires in `x-grant-key`.
+
+    | grant key | kind | endpoint |
+    |---|---|---|
+    | `locations` | read | `GET /bootstrap` |
+    | `availability` | read | `GET /availability` |
+    | `quote` | read | `GET /quote` |
+    | `bookings.list` | read | `GET /bookings` |
+    | `booking.read` | read | `GET /booking` |
+    | `booking.create` | write | `POST /bookings` (and bare `POST /`) |
+    | `booking.cancel` | write | `POST /cancel` |
+    | `booking.end` | write | `POST /end` |
+    | `booking.extend` | write | `POST /extend` |
+    | `booking.resend_code` | write | `POST /resend-code` |
+    | `booking.reissue_code` | write | `POST /reissue-code` |
+
+    Calling an endpoint whose grant the partner does not hold is
+    `403 not_permitted`. A grant is checked inside the operation, so a missing
+    grant is reported after authentication, never instead of it.
+
+    Three further operation keys exist in the server-side registry but are **not
+    built** and have no endpoint: `booking.open`, `booking.add_lockers`,
+    `booking.overstay`. They are listed under `x-planned-operations` at the root
+    of this document so a client can recognise the strings, and they deliberately
+    appear nowhere as a path. If one of them shows up in your
+    `granted_operations`, there is still nothing to call.
+
+    ## Behaviours that surprise integrators
+
+    * **Customer identity is first-write-wins by email.** Creating a booking
+      resolves the customer by email (or phone) and reuses the existing row if
+      one matches. A later create under the same email with a *different* `name`
+      does **not** update the stored name, and the response echoes the stored
+      one. Proven live: a create sending `"E2E Rerun B"` came back with the
+      earlier `"E2E Rerun A"`. Do not use the returned `customer.name` to confirm
+      what you sent.
+    * **`access_code` is not always present on a create.** See the create
+      response schema — it is `string` or `null`, and the two conditions that
+      produce `null` are named there.
+    * **`resend-code` and `reissue-code` do not email the customer.** They return
+      the code in the response body and nothing else leaves the platform.
+      Delivering it to the end customer is the partner's job. (`reissue-code`
+      additionally enqueues a device event so the physical keypad learns the new
+      code; until that is consumed, the OLD code still opens the door.)
+    * **`GET /bookings` is capped at 100 rows, newest first, with no
+      pagination.** There is no cursor, no `offset` and no total count.
+    * **Times are UTC ISO-8601 instants.** Multi-day quoting anchors on the
+      Asia/Dubai business date, which can make a multi-day quote indicative
+      rather than exact; a create charges from the real booking start.
+
+    ## Data handling
+
+    Creating a booking sends us your customer's contact details — an email
+    address, or a phone number, and optionally a name — because a booking
+    resolves to a customer record on our side and a confirmation notification is
+    sent to that address. That makes both parties handlers of personal data under
+    the **UAE Personal Data Protection Law (Federal Decree-Law No. 45 of 2021)**,
+    and a short data-handling understanding forms part of the partner agreement.
+    Agree it before you send live traffic, not after.
+
+    Practically, three rules:
+
+    * **Customer data goes in the request body, over HTTPS, never in a URL.** No
+      endpoint here takes a customer identifier as a query parameter, and a URL
+      is logged in places a body is not.
+    * **Send the minimum that identifies the customer.** One of `email` or
+      `phone` is required; `name` is optional and is only used for the booking
+      record.
+    * **Customer identity is first-write-wins by email** — see *Behaviours that
+      surprise integrators*. The record we keep may not carry the name you sent,
+      so do not treat the echoed `customer` object as confirmation of what you
+      submitted.
+
+    ## About the examples
+
+    **Every example in this document is illustrative.** The response examples are
+    reproduced from a real end-to-end run against the dev branch project on
+    2026-08-15, with every identifier, address, code and reference replaced by an
+    obviously synthetic placeholder. No example contains a real customer email, a
+    real access code, a real partner key or a real booking reference. Do not
+    treat any identifier here as callable, and do not copy an example UUID into a
+    request.
+  contact:
+    name: CityLockers partner integrations
+  x-source-of-truth: supabase/functions/partner-bridge/index.ts
+  x-authored-from:
+    - supabase/functions/partner-bridge/index.ts (edge dispatch, statuses, header rules)
+    - supabase/functions/partner-bridge/key_prefix.ts (key prefix derivation)
+    - supabase/migrations/20260530070436_baseline.sql (partner.* and booking.*_via_partner RPCs)
+    - supabase/migrations/20260815170000_partner_api_key_mode.sql (key mode + three-segment prefix)
+    - supabase/migrations_archive/20260728140000_end_booking_early.sql (window guard deletion)
+    - CC Reports/khizana/2026-08-15-partner-api-e2e-rerun.md (live observation, authoritative)
+
+servers:
+  - url: https://dyxplwuxytotvwpxtksv.functions.supabase.co/partner-bridge
+    description: >-
+      Production. Supabase project ref `dyxplwuxytotvwpxtksv`. Real bookings,
+      real money, real customer notifications. A `kpk_live_…` key issued for
+      production authenticates here and nowhere else.
+  - url: https://xqpzaelgjcrgiajairaa.functions.supabase.co/partner-bridge
+    description: >-
+      Dev branch. Supabase project ref `xqpzaelgjcrgiajairaa`. A separate
+      database with its own partners, keys, locations and bookings — a key from
+      one host never works on the other. This is where the live exercise behind
+      this document was run. Note that it is a *development branch*, not a
+      customer-facing sandbox: bookings created here still fire real
+      confirmation notifications to whatever address you supply.
+
+security:
+  - partnerApiKey: []
+
+tags:
+  - name: Discovery
+    description: What this key may sell, and what it costs.
+  - name: Bookings
+    description: Creating and reading bookings.
+  - name: Lifecycle
+    description: Changing a booking after it exists.
+  - name: Access codes
+    description: Handing the end customer a way in.
+
+x-planned-operations:
+  - key: booking.open
+    kind: write
+    label: Open locker
+    status: planned
+    note: >-
+      Present in the server-side operation registry with is_built = false. No
+      endpoint exists. Opening a locker remotely is not callable through this
+      API.
+  - key: booking.add_lockers
+    kind: write
+    label: Add lockers
+    status: planned
+    note: >-
+      Present in the registry with is_built = false. No endpoint exists. Adding
+      lockers to an existing booking is not callable; create a second booking.
+  - key: booking.overstay
+    kind: write
+    label: Overstay charge
+    status: planned
+    note: >-
+      Present in the registry with is_built = false. No endpoint exists.
+      Overstay is handled entirely platform-side today.
+
+paths:
+  /bootstrap:
+    get:
+      tags: [Discovery]
+      operationId: getBootstrap
+      summary: What this key can sell
+      description: |
+        Self-configuration for the integration: the partner id, the period
+        policy the partner is held to, the operations the partner is granted,
+        the locations in this key's scope with the locker sizes offered at each,
+        and the **mode of the key you presented**.
+
+        `sizes[].capacity` is the STATIC count of operational compartments of
+        that size at the location — how many physically exist and are in
+        service. It is not live availability; a size can show `capacity: 12` and
+        have nothing free right now. Use `GET /availability` for that.
+
+        Operating hours are **not** returned. Nothing in this response describes
+        when a location is open.
+      x-grant-key: locations
+      x-idempotency-key: not-read
+      responses:
+        "200":
+          description: |
+            The key's scoped configuration.
+
+            **`mode` is spliced in by the edge function, not by the RPC.** The
+            underlying `partner.partner_bootstrap(partner_id)` procedure has no
+            concept of which key was presented — it is keyed on the partner, and
+            a partner can hold several keys. The edge function appends `mode`
+            last, from the row of the key that just authenticated, so the
+            authenticated value always wins. A schema derived from the RPC's
+            return object alone would silently omit this field; it is a real,
+            load-bearing part of the response.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BootstrapOk" }
+              examples:
+                observed:
+                  summary: Live capture, sanitised
+                  description: >-
+                    Reproduced from the 2026-08-15 run. The run's capture elided
+                    `granted_operations` as "11 entries"; the array shown here is
+                    the full set of eleven built operations from the server-side
+                    registry, which is what those eleven entries are.
+                  value:
+                    ok: true
+                    partner_id: "11111111-1111-4111-8111-111111111111"
+                    period_policy:
+                      allow_intraday: true
+                      allow_multiday: true
+                      day_minutes: 1440
+                      multiday_max_minutes: 527040
+                      intraday_durations: []
+                    granted_operations:
+                      - { key: "availability", kind: "read", label: "Availability" }
+                      - { key: "booking.cancel", kind: "write", label: "Cancel booking" }
+                      - { key: "booking.create", kind: "write", label: "Create booking" }
+                      - { key: "booking.end", kind: "write", label: "End booking" }
+                      - { key: "booking.extend", kind: "write", label: "Extend booking" }
+                      - { key: "booking.read", kind: "read", label: "Booking detail" }
+                      - { key: "booking.reissue_code", kind: "write", label: "Reissue access code" }
+                      - { key: "booking.resend_code", kind: "write", label: "Resend access code" }
+                      - { key: "bookings.list", kind: "read", label: "My bookings" }
+                      - { key: "locations", kind: "read", label: "Locations" }
+                      - { key: "quote", kind: "read", label: "Price quote" }
+                    locations:
+                      - id: "22222222-2222-4222-8222-222222222222"
+                        name: "Example Location"
+                        address: null
+                        lat: null
+                        lon: null
+                        sizes:
+                          - { id: "33333333-3333-4333-8333-333333333333", name: "large", capacity: 2 }
+                          - { id: "44444444-4444-4444-8444-444444444444", name: "medium", capacity: 1 }
+                          - { id: "55555555-5555-4555-8555-555555555555", name: "small", capacity: 2 }
+                    mode: "live"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The partner is not granted the `locations` operation.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotPermitted" }
+              example: { ok: false, reason: "not_permitted" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /availability:
+    get:
+      tags: [Discovery]
+      operationId: getAvailability
+      summary: Free compartments per size for a window
+      description: |
+        Live free count per locker size at one scoped location, for a window.
+        The count uses the same predicate the create path uses to pick lockers,
+        so it agrees with what a create would allow for the same window. A full
+        size still appears, with `available: 0`.
+
+        It does **not** re-enforce the partner's period policy — create is the
+        authoritative gate. A window this endpoint happily counts can still be
+        refused by create with `period_not_allowed`.
+      x-grant-key: availability
+      x-idempotency-key: not-read
+      parameters:
+        - name: location_id
+          in: query
+          required: true
+          description: A location id from `GET /bootstrap`. Must be in this key's scope.
+          schema: { type: string, format: uuid }
+          example: "22222222-2222-4222-8222-222222222222"
+        - name: duration_minutes
+          in: query
+          required: true
+          description: >-
+            Window length in whole minutes, at least 1. Note this endpoint's
+            floor is far below what a create will accept.
+          schema: { type: integer, minimum: 1 }
+          example: 480
+        - name: start_time
+          in: query
+          required: false
+          description: >-
+            Window start as an ISO-8601 instant. Omit for "now" — the server
+            defaults to the current time.
+          schema: { type: string, format: date-time }
+          example: "2026-08-15T19:32:20Z"
+      responses:
+        "200":
+          description: Free count per offered size for the requested window.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvailabilityOk" }
+              examples:
+                observed:
+                  summary: Live capture, sanitised (8-hour window)
+                  value:
+                    ok: true
+                    location_id: "22222222-2222-4222-8222-222222222222"
+                    start: "2026-08-15T19:32:20Z"
+                    duration_minutes: 480
+                    end: "2026-08-16T03:32:20Z"
+                    availability:
+                      - { id: "33333333-3333-4333-8333-333333333333", name: "large", available: 2 }
+                      - { id: "44444444-4444-4444-8444-444444444444", name: "medium", available: 1 }
+                      - { id: "55555555-5555-4555-8555-555555555555", name: "small", available: 2 }
+        "400":
+          description: >-
+            `invalid` — `location_id` missing, or `duration_minutes` missing,
+            non-integer or below 1. Raised by the edge function before the RPC
+            is called, and again by the RPC as a backstop.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalid" }
+              example:
+                ok: false
+                reason: "invalid"
+                error: "location_id and a positive duration_minutes are required."
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: |
+            Two distinct branches, both 403:
+
+            * `out_of_scope` — the location exists but is not in this key's scope.
+              Checked first.
+            * `not_permitted` — the partner is not granted `availability`.
+          x-observed: "out_of_scope observed live 2026-08-15; not_permitted not observed"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorScopedForbidden" }
+              examples:
+                out_of_scope:
+                  summary: Live capture — location outside the key's scope
+                  value: { ok: false, reason: "out_of_scope" }
+                not_permitted:
+                  summary: Grant missing (not observed live)
+                  value: { ok: false, reason: "not_permitted" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /quote:
+    get:
+      tags: [Discovery]
+      operationId: getQuote
+      summary: Price a size and window without booking
+      description: |
+        The tier price for one locker size at a scoped location over a window,
+        without creating anything. It reads the same price engine every charge
+        path reads, so a quote agrees with what a create would charge for the
+        same inputs.
+
+        Where several price models are attached at a location, the **cheapest
+        model that can price the request wins**. `per_locker` is that model's
+        unit price; `amount` is `per_locker × quantity` with the model's
+        multi-locker discount applied and rounded up to the currency's minor
+        unit.
+
+        As with availability, the partner's period policy is not re-enforced
+        here.
+      x-grant-key: quote
+      x-idempotency-key: not-read
+      parameters:
+        - name: location_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+          example: "22222222-2222-4222-8222-222222222222"
+        - name: locker_size_id
+          in: query
+          required: true
+          description: A size id from `GET /bootstrap`'s `locations[].sizes[]`.
+          schema: { type: string, format: uuid }
+          example: "33333333-3333-4333-8333-333333333333"
+        - name: duration_minutes
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+          example: 480
+        - name: quantity
+          in: query
+          required: false
+          description: Number of lockers of this size. Defaults to 1.
+          schema: { type: integer, minimum: 1, default: 1 }
+          example: 1
+      responses:
+        "200":
+          description: The price for the requested size, quantity and window.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuoteOk" }
+              examples:
+                observed:
+                  summary: Live capture, sanitised (one large locker, 8 hours)
+                  value:
+                    ok: true
+                    location_id: "22222222-2222-4222-8222-222222222222"
+                    locker_size_id: "33333333-3333-4333-8333-333333333333"
+                    quantity: 1
+                    duration_minutes: 480
+                    per_locker: 9
+                    amount: 9
+                    currency: "AED"
+        "400":
+          description: >-
+            `invalid` — a required parameter is missing or non-positive
+            (edge-level), or price models exist at the location but **none can
+            price this size for this duration** (RPC-level: a non-chip duration,
+            a size not offered, or no anchor). The two branches are not
+            distinguishable from the response.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalid" }
+              example:
+                ok: false
+                reason: "invalid"
+                error: "location_id, locker_size_id and a positive integer duration_minutes are required."
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: |
+            * `out_of_scope` — the location is not in this key's scope.
+            * `not_permitted` — the partner is not granted `quote`.
+          x-observed: not observed live on this endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorScopedForbidden" }
+              example: { ok: false, reason: "out_of_scope" }
+        "409":
+          description: >-
+            `unavailable` — no deployed wall at the location carries a price
+            model at all, so nothing there can be priced. Distinct from the 400
+            case, where a model exists but cannot price these particular inputs.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorUnavailable" }
+              example: { ok: false, reason: "unavailable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /bookings:
+    get:
+      tags: [Bookings]
+      operationId: listBookings
+      summary: List this key's bookings
+      description: |
+        Every booking this partner has created through the API, newest first,
+        **capped at 100 rows**. There is no pagination, no cursor and no total
+        count; the 101st-oldest booking is simply not returned. Each row has the
+        same object shape `GET /booking` returns for one booking.
+
+        Access codes are never included here — that is `POST /resend-code`'s job
+        and it is granted separately.
+      x-grant-key: bookings.list
+      x-idempotency-key: not-read
+      responses:
+        "200":
+          description: The partner's bookings, newest first, at most 100.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingsListOk" }
+              examples:
+                observed_empty:
+                  summary: Live capture — a partner with no bookings yet
+                  value:
+                    ok: true
+                    partner_id: "11111111-1111-4111-8111-111111111111"
+                    bookings: []
+                populated:
+                  summary: >-
+                    The same response once a booking exists. The row is the
+                    booking-detail object captured live on 2026-08-15,
+                    sanitised.
+                  value:
+                    ok: true
+                    partner_id: "11111111-1111-4111-8111-111111111111"
+                    bookings:
+                      - reference: "CL-EXAMPLE-0001"
+                        status: "active"
+                        location: "Example Location"
+                        start: "2026-08-15T19:32:21Z"
+                        end: "2026-08-16T03:32:21Z"
+                        total: 9
+                        currency: "AED"
+                        sizes:
+                          - { id: "33333333-3333-4333-8333-333333333333", name: "large", quantity: 1 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The partner is not granted the `bookings.list` operation.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotPermitted" }
+              example: { ok: false, reason: "not_permitted" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+    post:
+      tags: [Bookings]
+      operationId: createBooking
+      summary: Create a booking
+      description: |
+        Reserve lockers at a scoped location for a window, resolve or create the
+        end customer, price and settle the booking according to the partner's
+        collection mode, and return the access code where one exists.
+
+        **Settlement is read from the partner record, never from this request.**
+        A `counterparty_collects` partner (you collected the money) settles
+        immediately: the booking comes back `active` with an access code. A
+        `we_collect` partner awaits the payment gateway: the booking comes back
+        `pending` with `access_code: null`.
+
+        **A confirmation notification fires to the customer** on a booking that
+        becomes active. This happens on the dev branch host too.
+
+        **Duration.** Send either `duration_minutes` or `end_time`; an explicit
+        `duration_minutes` wins, otherwise the window is derived from `end_time`
+        against `start_time` (or now). The edge function refuses anything below
+        60 minutes, but the booking engine's real floor is **180 minutes** (the
+        smallest chip), so a 60–179 minute request passes the edge check and is
+        then refused by the engine with `invalid`. Above a day, the window must
+        be a whole number of 1440-minute blocks or it is `invalid_duration`.
+
+        **Customer identity is first-write-wins by email** — see the note in the
+        API description. The `customer` object returned is the *stored* customer,
+        which may not carry the name you sent.
+
+        ### Security note, specific to this endpoint
+
+        `Idempotency-Key` presence and JSON body parsing both happen **before**
+        the API key is verified on this route. A missing header or a malformed
+        body therefore returns `400 invalid` **without authentication** — the
+        `400 invalid` branch here is reachable by an unauthenticated caller.
+        This is confirmed live. It is specific to create: every other endpoint
+        verifies the key first, so their `400 invalid` branches are reachable
+        only after authentication. The shape-validation 400 (missing
+        `location_id`, bad `items`, no customer identifier, sub-60-minute
+        window) is likewise pre-authentication on this route.
+      x-grant-key: booking.create
+      x-idempotency-key: required
+      x-unauthenticated-branches:
+        - "400 invalid — Idempotency-Key header missing or blank"
+        - "400 invalid — malformed JSON body"
+        - "400 invalid — missing or malformed field (shape validation)"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateBookingRequest" }
+            examples:
+              intraday:
+                summary: One large locker for 8 hours, customer identified by email
+                value:
+                  location_id: "22222222-2222-4222-8222-222222222222"
+                  items:
+                    - { locker_size_id: "33333333-3333-4333-8333-333333333333", quantity: 1 }
+                  duration_minutes: 480
+                  customer:
+                    email: "customer@example.com"
+                    name: "Example Customer"
+              explicit_window:
+                summary: An explicit window, using start_time and end_time
+                value:
+                  location_id: "22222222-2222-4222-8222-222222222222"
+                  items:
+                    - { locker_size_id: "33333333-3333-4333-8333-333333333333", quantity: 2 }
+                  start_time: "2026-08-15T19:32:21Z"
+                  end_time: "2026-08-16T03:32:21Z"
+                  customer:
+                    phone: "+971500000000"
+      responses:
+        "200":
+          description: |
+            The booking, fresh or replayed.
+
+            `replayed: false` — this request created the booking. Every field
+            describes what was just created.
+
+            `replayed: true` — this Idempotency-Key had already been used, and
+            **the fields describe the booking's state right now, not the
+            original response**. `status`, `total` and `access_code` may all have
+            moved on. See the replay note in the API description.
+          x-observed: live 2026-08-15 (fresh, bare-path alias, and replay)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateBookingOk" }
+              examples:
+                fresh:
+                  summary: Live capture, sanitised — a new booking
+                  value:
+                    ok: true
+                    replayed: false
+                    reference: "CL-EXAMPLE-0001"
+                    status: "active"
+                    total: 9
+                    currency: "AED"
+                    access_code: "000000"
+                    customer:
+                      id: "66666666-6666-4666-8666-666666666666"
+                      name: "Example Customer"
+                      email: "customer@example.com"
+                      phone: null
+                replayed:
+                  summary: >-
+                    Live capture, sanitised — the SAME Idempotency-Key replayed
+                    after the booking had been extended and then cancelled. Note
+                    `status` and `total` disagree with the original create's
+                    response above. This is correct behaviour.
+                  value:
+                    ok: true
+                    replayed: true
+                    reference: "CL-EXAMPLE-0001"
+                    status: "cancelled"
+                    total: 18
+                    currency: "AED"
+                    access_code: "000000"
+                    customer:
+                      id: "66666666-6666-4666-8666-666666666666"
+                      name: "Example Customer"
+                      email: "customer@example.com"
+                      phone: null
+                pending_payment:
+                  summary: >-
+                    A `we_collect` partner — the booking awaits the payment
+                    gateway, so there is no code yet.
+                  value:
+                    ok: true
+                    replayed: false
+                    reference: "CL-EXAMPLE-0002"
+                    status: "pending"
+                    total: 9
+                    currency: "AED"
+                    access_code: null
+                    customer:
+                      id: "66666666-6666-4666-8666-666666666666"
+                      name: "Example Customer"
+                      email: "customer@example.com"
+                      phone: null
+        "400":
+          description: |
+            * `invalid` — missing/blank `Idempotency-Key`, malformed JSON body,
+              or a failed shape check (no `location_id`, empty or malformed
+              `items`, no `customer.email` and no `customer.phone`, window under
+              60 minutes). **All three are reachable unauthenticated.**
+            * `invalid` — also returned post-authentication by the booking engine
+              for a window the engine cannot price (including the 60–179 minute
+              gap, an inactive location, or a size not offered).
+            * `invalid_duration` — a multi-day window that is not a whole number
+              of 1440-minute blocks.
+            * `period_not_allowed` — the window is outside the partner's own
+              period policy: sub-24h when the partner is not allowed intraday,
+              or over 24h when it is not allowed multiday.
+          x-observed: "invalid (malformed body, unauthenticated) observed live 2026-08-15; invalid_duration and period_not_allowed not observed"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorCreateBadRequest" }
+              examples:
+                malformed_body:
+                  summary: Live capture — malformed JSON, returned before the key was checked
+                  value: { ok: false, reason: "invalid", error: "Malformed JSON body." }
+                missing_idempotency_key:
+                  summary: Header absent
+                  value: { ok: false, reason: "invalid", error: "Idempotency-Key header is required." }
+                period_not_allowed:
+                  summary: The partner's period policy forbids this window (not observed live)
+                  value: { ok: false, reason: "period_not_allowed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: |
+            * `capability` — the partner does not hold the inbound direction.
+              Returned directly by the edge function after verification.
+            * `out_of_scope` — the location is not in this key's scope.
+            * `not_permitted` — the partner is not granted `booking.create`.
+            * `unauthorized` — **403, not 401**: the booking wrapper found the
+              partner not active. Only reachable if the partner is deactivated
+              between key verification and the wrapper's own read, since
+              verification already requires an active partner. This is the
+              one-reason-two-statuses case described in the API description.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorCreateForbidden" }
+              examples:
+                capability:
+                  value: { ok: false, reason: "capability", error: "Partner lacks the inbound capability." }
+                out_of_scope:
+                  value: { ok: false, reason: "out_of_scope" }
+                unauthorized_403:
+                  summary: The partner went inactive mid-request
+                  value: { ok: false, reason: "unauthorized" }
+        "409":
+          description: |
+            * `unavailable` — no wall at the location can satisfy every requested
+              size and quantity for the window, or the resolved wall carries no
+              price model, or a concurrent booking took the compartment first.
+            * `in_progress` — this Idempotency-Key is currently being processed
+              by another in-flight request. Retry after a short delay; do not
+              change the key.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorCreateConflict" }
+              examples:
+                unavailable:
+                  value: { ok: false, reason: "unavailable" }
+                in_progress:
+                  value: { ok: false, reason: "in_progress" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /:
+    get:
+      tags: [Bookings]
+      operationId: listBookingsBarePath
+      summary: List this key's bookings (bare-path alias)
+      description: |
+        **This is an alias of `GET /bookings`, not a separate endpoint.** The
+        bare-path fallback in the dispatch is not `POST`-only: a request with no
+        trailing path segment resolves to the `bookings` sub-route for **either
+        method**, so `GET /partner-bridge` returns the same list, with the same
+        grant, the same 100-row cap and the same object shape as
+        `GET /partner-bridge/bookings`.
+
+        **This operation was added by the Phase 4a drift guard**, which compared
+        the dispatch against this document and found the `GET` half of the alias
+        served by the code but undeclared here — the first drift the guard
+        caught, on its first run, against a spec written the day before.
+
+        **Prefer `GET /bookings`.** Every response, example and error branch is
+        specified there and is not repeated here.
+      x-grant-key: bookings.list
+      x-idempotency-key: not-read
+      x-alias-of: "GET /bookings"
+      responses:
+        "200":
+          description: As `GET /bookings`.
+          x-observed: live 2026-08-16
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingsListOk" }
+              example:
+                ok: true
+                partner_id: "11111111-1111-4111-8111-111111111111"
+                bookings: []
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: As `GET /bookings`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotPermitted" }
+              example: { ok: false, reason: "not_permitted" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+    post:
+      tags: [Bookings]
+      operationId: createBookingBarePath
+      summary: Create a booking (bare-path alias)
+      description: |
+        **This is an alias of `POST /bookings`, not a separate endpoint.** A
+        `POST` to the function root with no trailing path segment resolves to
+        the `bookings` sub-route, so `POST /partner-bridge` behaves exactly like
+        `POST /partner-bridge/bookings`: same grant, same required
+        `Idempotency-Key`, same request body, same responses, same status codes.
+
+        It is documented because it is real and was proven live on 2026-08-15 —
+        a genuine second booking was created through a request carrying no
+        trailing segment — and because a client or proxy that strips a trailing
+        path will hit it by accident rather than by intent.
+
+        **Prefer `POST /bookings`.** The alias exists for compatibility; the
+        named path is the one to code against. Every response, example and
+        error branch is specified on `POST /bookings` and is not repeated here.
+      x-grant-key: booking.create
+      x-idempotency-key: required
+      x-alias-of: "POST /bookings"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateBookingRequest" }
+            examples:
+              intraday:
+                summary: Identical to the named path's request
+                value:
+                  location_id: "22222222-2222-4222-8222-222222222222"
+                  items:
+                    - { locker_size_id: "33333333-3333-4333-8333-333333333333", quantity: 1 }
+                  duration_minutes: 480
+                  customer:
+                    email: "customer@example.com"
+                    name: "Example Customer"
+      responses:
+        "200":
+          description: As `POST /bookings`.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateBookingOk" }
+              examples:
+                observed:
+                  summary: >-
+                    Live capture, sanitised — a real booking created through a
+                    request with no trailing path segment.
+                  value:
+                    ok: true
+                    replayed: false
+                    reference: "CL-EXAMPLE-0002"
+                    status: "active"
+                    total: 9
+                    currency: "AED"
+                    access_code: "000000"
+                    customer:
+                      id: "66666666-6666-4666-8666-666666666666"
+                      name: "Example Customer"
+                      email: "customer@example.com"
+                      phone: null
+        "400":
+          description: As `POST /bookings`, including the unauthenticated branches.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorCreateBadRequest" }
+              example: { ok: false, reason: "invalid", error: "Malformed JSON body." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: As `POST /bookings`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorCreateForbidden" }
+              example: { ok: false, reason: "out_of_scope" }
+        "409":
+          description: As `POST /bookings`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorCreateConflict" }
+              example: { ok: false, reason: "unavailable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /booking:
+    get:
+      tags: [Bookings]
+      operationId: getBooking
+      summary: Read one booking
+      description: |
+        Detail for one booking this key created, in the same object shape as a
+        row of `GET /bookings`. A reference that belongs to another partner is
+        `not_found` — indistinguishable from a reference that does not exist,
+        deliberately.
+
+        The window (`start`, `end`) is the minimum start and maximum end across
+        the booking's lockers, so it reflects any extension already applied. No
+        access code is returned here.
+      x-grant-key: booking.read
+      x-idempotency-key: not-read
+      parameters:
+        - name: reference
+          in: query
+          required: true
+          description: The booking reference returned by create.
+          schema: { $ref: "#/components/schemas/BookingReference" }
+          example: "CL-EXAMPLE-0001"
+      responses:
+        "200":
+          description: The booking.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingDetailOk" }
+              examples:
+                observed:
+                  summary: Live capture, sanitised
+                  value:
+                    ok: true
+                    booking:
+                      reference: "CL-EXAMPLE-0001"
+                      status: "active"
+                      location: "Example Location"
+                      start: "2026-08-15T19:32:21Z"
+                      end: "2026-08-16T03:32:21Z"
+                      total: 9
+                      currency: "AED"
+                      sizes:
+                        - { id: "33333333-3333-4333-8333-333333333333", name: "large", quantity: 1 }
+        "400":
+          description: "`invalid` — the `reference` query parameter is missing or blank."
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalid" }
+              example: { ok: false, reason: "invalid", error: "reference is required." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The partner is not granted the `booking.read` operation.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotPermitted" }
+              example: { ok: false, reason: "not_permitted" }
+        "404":
+          description: >-
+            `not_found` — no confirmed booking with that reference belongs to
+            this partner, or the booking has since been soft-deleted.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotFound" }
+              example: { ok: false, reason: "not_found" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /cancel:
+    post:
+      tags: [Lifecycle]
+      operationId: cancelBooking
+      summary: Cancel a booking
+      description: |
+        No-refund cancel of a booking this key created. The lockers are released
+        immediately.
+
+        **Cancelling does not reverse commission.** The commission accrued when
+        the booking was created stays accrued.
+
+        Only a `pending` or `active` booking can be cancelled; anything else is
+        `invalid_state`.
+      x-grant-key: booking.cancel
+      x-idempotency-key: not-read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReferenceRequest" }
+            example: { reference: "CL-EXAMPLE-0001" }
+      responses:
+        "200":
+          description: The booking is cancelled.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CancelOk" }
+              examples:
+                observed:
+                  summary: Live capture, sanitised
+                  value: { ok: true, reference: "CL-EXAMPLE-0001", status: "cancelled" }
+        "400":
+          description: >-
+            `invalid` — malformed JSON body, or `reference` missing or blank.
+            Reachable only after authentication on this route: the key is
+            verified before the body is read.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalid" }
+              example: { ok: false, reason: "invalid", error: "reference is required." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/LifecycleForbidden" }
+        "404":
+          description: "`not_found` — no such booking for this partner."
+          x-observed: not observed live on this endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotFound" }
+              example: { ok: false, reason: "not_found" }
+        "409":
+          description: >-
+            `invalid_state` — the booking is neither `pending` nor `active`; it
+            has already been cancelled, completed or expired.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalidState" }
+              example: { ok: false, reason: "invalid_state" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /end:
+    post:
+      tags: [Lifecycle]
+      operationId: endBooking
+      summary: End a booking
+      description: |
+        Force-end a booking this key created. The lockers are released and the
+        booking becomes `completed`.
+
+        **Ending EARLY is allowed.** A live booking can be ended at any point
+        before its window closes and it completes immediately — proven live on
+        2026-08-15 against a booking with more than seven hours left to run.
+
+        There is no `window_not_expired` refusal on this endpoint. The
+        window-expiry guard was deleted in migration
+        `20260728140000_end_booking_early.sql`; the reason string survives in the
+        platform's shared status map only because removing it would have been
+        needless churn, and no live code path returns it through this route. It
+        is therefore **not listed as a response here**, and a source comment in
+        the edge function still describing that guard is stale.
+
+        Only a `pending` or `active` booking can be ended; anything else is
+        `invalid_state`.
+      x-grant-key: booking.end
+      x-idempotency-key: not-read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReferenceRequest" }
+            example: { reference: "CL-EXAMPLE-0002" }
+      responses:
+        "200":
+          description: The booking is completed.
+          x-observed: live 2026-08-15 (ended early, before the window closed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EndOk" }
+              examples:
+                observed:
+                  summary: Live capture, sanitised — an 8-hour booking ended minutes in
+                  value: { ok: true, reference: "CL-EXAMPLE-0002", status: "completed" }
+        "400":
+          description: >-
+            `invalid` — malformed JSON body, or `reference` missing or blank.
+            Post-authentication only.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalid" }
+              example: { ok: false, reason: "invalid", error: "reference is required." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/LifecycleForbidden" }
+        "404":
+          description: "`not_found` — no such booking for this partner."
+          x-observed: not observed live on this endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotFound" }
+              example: { ok: false, reason: "not_found" }
+        "409":
+          description: >-
+            `invalid_state` — the booking is neither `pending` nor `active`.
+            This is the ONLY 409 this endpoint can return.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalidState" }
+              example: { ok: false, reason: "invalid_state" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /extend:
+    post:
+      tags: [Lifecycle]
+      operationId: extendBooking
+      summary: Extend a booking
+      description: |
+        Push the end of a booking this key created. The added block is priced
+        through the same tier engine as create and **charged for real**;
+        settlement follows the partner's collection mode exactly as create does.
+
+        **`Idempotency-Key` is REQUIRED on this endpoint**, because it moves
+        money. A retry with the same key returns the original outcome and never
+        charges twice. Earlier written accounts of this API described the header
+        as create-only; that was wrong.
+
+        **A REFUSED EXTEND SPENDS THE KEY. Retry a corrected duration under a NEW
+        key.** The key is claimed before `extend_minutes` is validated, so a
+        refusal is recorded against it as that key's final outcome. Re-sending
+        the same key with a duration that *would* price returns the original
+        `400 invalid_duration` unchanged — the new duration is never looked at.
+        Observed live 2026-08-18: key K at 90 minutes → `400 invalid_duration`;
+        K again at 480 minutes → `400 invalid_duration`, byte-identical; a fresh
+        key at 480 minutes → `200`, extended and charged. The refusal body
+        carries **no `replayed` field**, so the replay is not visible in the
+        response. **Fixed in 0.215.0:** a replayed refusal now carries
+        `replayed: true` as well, so a cached rejection is distinguishable from a
+        fresh one. See the `Error` schema for the exact guarantee — the field is
+        optional and is never synthesised.
+
+        **Each extension accrues its own commission entry.** An extension does
+        not amend the booking's original accrual, it adds a second one.
+
+        `extend_minutes` must be an integer of at least **180** (3 hours) and at
+        most 365 days; the resulting end must also stay within 366 days of now.
+        A duration of 180 or more that the pricing engine still cannot sell for
+        this size (not a chip duration or whole days) is refused the same way —
+        `400 invalid_duration` — not a 500. See the `400` response below for the
+        full refusal range.
+
+        Fixed 2026-08-16 (previously this range 500'd; see CHANGELOG). The value
+        to send is a duration the size actually prices — read them from the
+        price model, and prefer whole days or the size's chip durations.
+      x-grant-key: booking.extend
+      x-idempotency-key: required
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExtendRequest" }
+            example: { reference: "CL-EXAMPLE-0001", extend_minutes: 480 }
+      responses:
+        "200":
+          description: |
+            The extension was applied, or an earlier identical request's outcome
+            is being replayed.
+
+            `end` is the booking's new end. `extension_charge` is what this
+            extension cost; `total` is the booking's new cumulative total.
+            `status` is the booking's status as it was when the extension was
+            accepted.
+
+            On `replayed: true` this is the **stored result of the original
+            extension**, stamped as replayed — unlike a create replay, which
+            re-reads live state.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtendOk" }
+              examples:
+                observed:
+                  summary: Live capture, sanitised — 8 more hours on a 9 AED booking
+                  value:
+                    ok: true
+                    replayed: false
+                    reference: "CL-EXAMPLE-0001"
+                    status: "active"
+                    end: "2026-08-16T11:32:21Z"
+                    extension_charge: 9
+                    currency: "AED"
+                    total: 18
+        "400":
+          description: |
+            * `invalid` — missing/blank `Idempotency-Key` (checked before the
+              body is read, but after the key is verified), malformed JSON body,
+              missing `reference`, or `extend_minutes` absent, non-integer or
+              below 1 (edge-level shape check).
+            * `invalid_duration` — `extend_minutes` **below 180** (the 3-hour
+              floor), above 365 days, a new end beyond 366 days from now, or a
+              duration of 180 or more that the pricing engine cannot sell for
+              this size (not a chip duration or whole days for it). All four
+              cases return this same clean `400`, never a 500.
+          x-observed: "invalid_duration observed live 2026-08-16 at extend_minutes 1 and 59 (the pre-existing range); container-proven 2026-08-16 at 60, 90, 179, 181 and 200 (the fixed range)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorExtendBadRequest" }
+              examples:
+                missing_idempotency_key:
+                  value: { ok: false, reason: "invalid", error: "Idempotency-Key header is required." }
+                invalid_duration:
+                  value: { ok: false, reason: "invalid_duration" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/LifecycleForbidden" }
+        "404":
+          description: "`not_found` — no such booking for this partner."
+          x-observed: not observed live on this endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotFound" }
+              example: { ok: false, reason: "not_found" }
+        "409":
+          description: |
+            * `invalid_state` — the booking is neither `pending` nor `active`, or
+              it has no live locker holds left to push.
+            * `in_progress` — this Idempotency-Key is currently in flight on
+              another request.
+            * `unavailable` — a compartment the booking holds is already booked
+              by someone else for the extended window, so the extension cannot
+              be applied.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorExtendConflict" }
+              examples:
+                invalid_state:
+                  value: { ok: false, reason: "invalid_state" }
+                unavailable:
+                  value: { ok: false, reason: "unavailable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /resend-code:
+    post:
+      tags: [Access codes]
+      operationId: resendAccessCode
+      summary: Re-fetch the access code
+      description: |
+        Return the existing access code for a live booking this key created. It
+        is a pure read: the code is not changed, and **nothing is sent to the
+        customer** — no email, no SMS, no push. Despite the name, delivering the
+        code is the partner's job.
+
+        Refused with `invalid_state` when the booking is not `pending` or
+        `active`, when the location is a **beach** location (the passcode there
+        is customer-set, not ours to hand out), or when no code exists yet
+        (a `we_collect` booking awaiting settlement). A successful response
+        therefore always carries a real code — never `null`.
+      x-grant-key: booking.resend_code
+      x-idempotency-key: not-read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReferenceRequest" }
+            example: { reference: "CL-EXAMPLE-0001" }
+      responses:
+        "200":
+          description: The booking's current access code.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessCodeOk" }
+              examples:
+                observed:
+                  summary: >-
+                    Live capture, sanitised. The real code was a 6-digit string;
+                    `000000` here is a placeholder, not a code that works.
+                  value:
+                    ok: true
+                    reference: "CL-EXAMPLE-0001"
+                    status: "active"
+                    access_code: "000000"
+        "400":
+          description: "`invalid` — malformed JSON body, or `reference` missing or blank."
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalid" }
+              example: { ok: false, reason: "invalid", error: "reference is required." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/LifecycleForbidden" }
+        "404":
+          description: "`not_found` — no such booking for this partner."
+          x-observed: not observed live on this endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotFound" }
+              example: { ok: false, reason: "not_found" }
+        "409":
+          description: >-
+            `invalid_state` — the booking is not live, or it is at a beach
+            location, or it has no access code yet. The three branches are not
+            distinguishable from the response.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalidState" }
+              example: { ok: false, reason: "invalid_state" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /reissue-code:
+    post:
+      tags: [Access codes]
+      operationId: reissueAccessCode
+      summary: Revoke and re-mint the access code
+      description: |
+        Delete the current access code of a live booking this key created and
+        mint a fresh one. This is a real write. **Nothing is sent to the
+        customer** — the new code comes back in the response and delivering it is
+        the partner's job.
+
+        **The physical keypad keeps honouring the OLD code until the device event
+        pipeline catches up.** Reissuing enqueues a `booking.updated` event; the
+        wall learns the new code when that event is consumed, not at the moment
+        of the API call. Plan for a short window in which both codes are, in
+        practice, live at the door.
+
+        Same refusals as `resend-code`: not live, beach location, or no existing
+        code → `invalid_state`.
+      x-grant-key: booking.reissue_code
+      x-idempotency-key: not-read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReferenceRequest" }
+            example: { reference: "CL-EXAMPLE-0001" }
+      responses:
+        "200":
+          description: The newly minted access code. The previous code is gone.
+          x-observed: live 2026-08-15
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessCodeOk" }
+              examples:
+                observed:
+                  summary: >-
+                    Live capture, sanitised. The real value differed from the
+                    code the same booking's `resend-code` had just returned,
+                    confirming the rotation.
+                  value:
+                    ok: true
+                    reference: "CL-EXAMPLE-0001"
+                    status: "active"
+                    access_code: "000000"
+        "400":
+          description: "`invalid` — malformed JSON body, or `reference` missing or blank."
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalid" }
+              example: { ok: false, reason: "invalid", error: "reference is required." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/LifecycleForbidden" }
+        "404":
+          description: "`not_found` — no such booking for this partner."
+          x-observed: not observed live on this endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorNotFound" }
+              example: { ok: false, reason: "not_found" }
+        "409":
+          description: >-
+            `invalid_state` — the booking is not live, or it is at a beach
+            location, or it has no code to replace.
+          x-observed: not observed live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorInvalidState" }
+              example: { ok: false, reason: "invalid_state" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+components:
+  securitySchemes:
+    partnerApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: kpk_<mode>_<8hex>_<64hex>
+      description: |
+        `Authorization: Bearer kpk_live_1a2b3c4d_<64 hex characters>`
+
+        Four underscore-separated segments:
+
+        | segment | example | secret? |
+        |---|---|---|
+        | literal | `kpk` | no |
+        | mode | `live` or `test` | no |
+        | key id | `1a2b3c4d` (8 hex) | no |
+        | secret | 64 hex characters | **yes** |
+
+        The first three segments are the key's **prefix** and are safe to log,
+        quote and store. The fourth is the secret and appears nowhere except the
+        `Authorization` header — the server keeps only a SHA-256 hash of the
+        whole key.
+
+        **Mode** is a property of the key, not of the request. `live` keys
+        operate on production data; `test` keys will operate on a sandbox
+        partner that does not exist yet, so no `test` key can currently be
+        minted. Read the mode of the key you hold from `GET /bootstrap`'s `mode`
+        field rather than parsing the string yourself, and treat the two hosts
+        under `servers` as separate worlds: a key issued on one never
+        authenticates on the other.
+
+        Legacy three-segment keys (`kpk_<8hex>_<64hex>`, no mode) no longer
+        authenticate at all and are rejected as `unauthorized`.
+
+  parameters:
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        A caller-chosen key that makes this request replay-safe. Required on
+        create and extend, the two operations that move money. Reuse the same
+        value to retry the same logical request; use a new value for a genuinely
+        new one. Missing or blank is `400 invalid`. A UUID is a good choice.
+
+        **A KEY IS SPENT BY ITS FIRST OUTCOME, INCLUDING A REJECTION — SO A
+        CORRECTED RETRY NEEDS A NEW KEY.** The key is claimed before the request
+        is validated, and the outcome recorded against it is final. If the first
+        request under a key is refused, the refusal is what that key now
+        returns: sending a **corrected** request under the same key replays the
+        original rejection and the correction is never evaluated. This is not a
+        same-payload rule — the request body is not compared, and changing it
+        changes nothing.
+
+        Concretely, observed live on `POST /extend` (2026-08-18): a key sent with
+        an unpriceable `extend_minutes` returned `400 invalid_duration`; the same
+        key re-sent with a **priceable** duration returned `400
+        invalid_duration` again, byte-identical; the same corrected request under
+        a **fresh** key returned `200` and extended the booking.
+
+        **Use a new key whenever you change the request.** Reuse a key only to
+        retry a request you have not altered — a timeout, a dropped connection,
+        an unknown outcome. Note also that a replayed **rejection** is not
+        flagged: unlike a replayed success, an error body carries no `replayed`
+        field, so a cached refusal is indistinguishable from a fresh one. If you
+        need to know which you got, track key reuse on your side.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        examples: ["9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"]
+
+  responses:
+    Unauthorized:
+      description: |
+        `unauthorized` at **401**, from this route's own key-verification step.
+        Three branches share it: no `Authorization: Bearer` header at all, a key
+        that matches no active key row, and a key whose partner is not active.
+
+        Note the distinct 403 flavour of the same reason string documented on
+        create and the lifecycle operations — see the API description.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorUnauthorized" }
+          examples:
+            bad_key:
+              summary: Live capture — a key that matches nothing
+              value: { ok: false, reason: "unauthorized", error: "Unauthorized." }
+            no_key:
+              summary: Live capture — no bearer token supplied
+              value: { ok: false, reason: "unauthorized", error: "Missing bearer API key." }
+    RateLimited:
+      description: >-
+        `rate_limited` — more than 60 requests in a minute from this key prefix.
+        The limiter is per function instance and resets on cold start, so the
+        real ceiling varies. Back off and retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorRateLimited" }
+          example: { ok: false, reason: "rate_limited", error: "Rate limit exceeded." }
+    ServerError:
+      description: >-
+        `server_error` — the function could not reach the database, could not
+        verify the key, or the underlying procedure failed. Never a raw stack
+        trace and never an unstructured 500 body. Retrying is reasonable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorServerError" }
+          example: { ok: false, reason: "server_error", error: "Verification failed." }
+    LifecycleForbidden:
+      description: |
+        The lifecycle operations share one 403 set, all produced inside the
+        operation's own procedure and mapped by the generic reason→status mapper:
+
+        * `capability` — the partner does not hold the inbound direction.
+        * `not_permitted` — the partner is not granted this specific operation.
+        * `unauthorized` — **403, not 401**: the partner was found not active by
+          the procedure. Reachable only if the partner is deactivated between
+          key verification and this read.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorLifecycleForbidden" }
+          examples:
+            not_permitted:
+              value: { ok: false, reason: "not_permitted" }
+            capability:
+              value: { ok: false, reason: "capability" }
+            unauthorized_403:
+              summary: The same reason string that means 401 elsewhere
+              value: { ok: false, reason: "unauthorized" }
+
+  schemas:
+    # ── shared primitives ────────────────────────────────────────────────────
+    BookingReference:
+      type: string
+      minLength: 1
+      description: >-
+        The partner's handle on a booking, allocated at creation and stable for
+        its lifetime. Treat it as an opaque string; do not parse it and do not
+        assume a numbering scheme.
+      examples: ["CL-EXAMPLE-0001"]
+    Currency:
+      type: string
+      description: ISO-4217 currency code of the price model that priced the booking.
+      examples: ["AED"]
+    Money:
+      type: number
+      minimum: 0
+      description: >-
+        An amount in the major unit of `currency`, rounded to the currency's
+        minor unit. Serialised as a JSON number.
+    Instant:
+      type: string
+      format: date-time
+      description: An ISO-8601 instant in UTC.
+      examples: ["2026-08-15T19:32:20Z"]
+    BookingStatus:
+      type: string
+      description: |
+        Lifecycle state of a booking.
+
+        * `pending` — created, awaiting payment (a `we_collect` partner). No
+          access code yet.
+        * `active` — paid or settled, the locker is held and usable.
+        * `cancelled` — cancelled; the locker is released, no refund.
+        * `completed` — ended; the locker is released.
+        * `expired` — the window ran out without the booking being closed.
+      enum: [pending, active, cancelled, completed, expired]
+    AccessCode:
+      type: string
+      pattern: "^[0-9]{6}$"
+      description: >-
+        Six decimal digits, generated from a cryptographic RNG. Hand it to the
+        end customer; it is what opens the compartment. Never log it.
+      examples: ["000000"]
+    GrantKey:
+      type: string
+      description: >-
+        An operation key from the partner grant vocabulary. The eleven callable
+        values are enumerated here; the three planned-but-unbuilt keys
+        (`booking.open`, `booking.add_lockers`, `booking.overstay`) can also
+        appear on a partner's grants and are listed under `x-planned-operations`
+        at the root of this document — holding one of those grants still gives
+        you nothing to call.
+      enum:
+        - locations
+        - availability
+        - quote
+        - bookings.list
+        - booking.read
+        - booking.create
+        - booking.cancel
+        - booking.end
+        - booking.extend
+        - booking.resend_code
+        - booking.reissue_code
+        - booking.open
+        - booking.add_lockers
+        - booking.overstay
+    Reason:
+      type: string
+      description: |
+        The complete machine-readable refusal vocabulary. Not every reason is
+        reachable on every endpoint — each operation narrows this enum to the
+        branches it can actually produce, and the HTTP status a reason maps to is
+        documented there rather than globally.
+
+        `window_not_expired` is listed for completeness of the vocabulary and is
+        **not reachable through any endpoint in this document**; the guard that
+        produced it was deleted and the string survives only in a shared status
+        map. It appears in no operation's response.
+      enum:
+        - unauthorized
+        - capability
+        - out_of_scope
+        - not_permitted
+        - not_found
+        - unavailable
+        - in_progress
+        - invalid_state
+        - window_not_expired
+        - invalid
+        - invalid_duration
+        - period_not_allowed
+        - rate_limited
+        - server_error
+
+    # ── envelopes ────────────────────────────────────────────────────────────
+    Error:
+      type: object
+      description: |
+        The refusal envelope. `ok` is always `false` and `reason` is always
+        present. Branch on `reason`.
+
+        `error` is a human-readable sentence and is present only on branches the
+        edge function itself produces; a refusal coming from the underlying
+        procedure carries `reason` alone. Its absence carries no meaning, and its
+        wording is not part of this contract.
+
+        `replayed` is **optional and not guaranteed**. It appears only on a refusal
+        from an operation that consulted an idempotency claim — in practice
+        **create and extend**, the two that require `Idempotency-Key` — and only
+        when the underlying procedure actually reported it. Where it appears,
+        `replayed: true` means this refusal is the **stored outcome of an earlier
+        request under the same key**, not a fresh evaluation of the request you
+        just sent.
+
+        **It is never synthesised.** A refusal that never reached an idempotency
+        claim — a malformed body, a failed key verification, a missing header, or
+        any read endpoint — omits the field entirely rather than asserting
+        `replayed: false`. Absence therefore means "not answered", not "fresh", so
+        do not treat a missing `replayed` as proof that a request was newly
+        evaluated.
+
+        Fixed 2026-08-18 (0.215.0). Both routes previously rebuilt the refusal from
+        `reason` alone and dropped the flag, so a cached rejection was
+        byte-identical to a fresh one. That mattered because **a key is spent by
+        its first outcome**: a caller who corrected an unpriceable duration and
+        retried under the same key received the original refusal back with nothing
+        in the response to say it was a replay. (An earlier revision of this
+        document claimed the extend route preserved the flag. It did not — both
+        dropped it.)
+      required: [ok, reason]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        reason: { $ref: "#/components/schemas/Reason" }
+        error:
+          type: string
+          description: Human-readable, advisory only. Never branch on it.
+        replayed:
+          type: boolean
+          description: Present when this refusal is a replay of an earlier rejected request.
+      additionalProperties: true
+
+    ErrorUnauthorized:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: unauthorized
+    ErrorNotPermitted:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: not_permitted
+    ErrorNotFound:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: not_found
+    ErrorInvalid:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: invalid
+    ErrorInvalidState:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: invalid_state
+    ErrorUnavailable:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: unavailable
+    ErrorRateLimited:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: rate_limited
+    ErrorServerError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              const: server_error
+    ErrorScopedForbidden:
+      description: 403 on a scoped read — the location, or the grant.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              enum: [out_of_scope, not_permitted]
+    ErrorLifecycleForbidden:
+      description: >-
+        403 on a lifecycle write. Includes `unauthorized`, which means 403 here
+        and 401 on the verification branch — the one-reason-two-statuses case.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              enum: [capability, not_permitted, unauthorized]
+    ErrorCreateForbidden:
+      description: 403 on create — capability, scope, grant, or a deactivated partner.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              enum: [capability, out_of_scope, not_permitted, unauthorized]
+    ErrorCreateBadRequest:
+      description: >-
+        400 on create. The `invalid` branch is reachable UNAUTHENTICATED — the
+        body is parsed before the key is verified on this route only.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              enum: [invalid, invalid_duration, period_not_allowed]
+    ErrorCreateConflict:
+      description: 409 on create — nothing free, or a replay still in flight.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              enum: [unavailable, in_progress]
+    ErrorExtendBadRequest:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              enum: [invalid, invalid_duration]
+    ErrorExtendConflict:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - properties:
+            reason:
+              type: string
+              enum: [invalid_state, in_progress, unavailable]
+
+    # ── discovery payloads ───────────────────────────────────────────────────
+    GrantedOperation:
+      type: object
+      description: >-
+        One operation the partner is granted. Note this is an OBJECT, not a bare
+        string — a client reading `granted_operations` as an array of strings
+        will break.
+      required: [key, kind, label]
+      properties:
+        key: { $ref: "#/components/schemas/GrantKey" }
+        kind:
+          type: string
+          enum: [read, write]
+          description: Grouping only. It does not affect what the endpoint does.
+        label:
+          type: string
+          description: Human-readable name, for display in your own UI.
+      additionalProperties: true
+    PeriodPolicy:
+      type: object
+      description: >-
+        What window shapes this partner may book. Enforced on create, and NOT
+        re-enforced by `/availability` or `/quote`.
+      required: [allow_intraday, allow_multiday, day_minutes, multiday_max_minutes, intraday_durations]
+      properties:
+        allow_intraday:
+          type: boolean
+          description: Whether sub-24h windows may be booked.
+        allow_multiday:
+          type: boolean
+          description: Whether windows of whole 24h blocks beyond one day may be booked.
+        day_minutes:
+          type: integer
+          description: Minutes in a booking day. Always 1440.
+        multiday_max_minutes:
+          type: integer
+          description: Ceiling on a multi-day window, in minutes.
+        intraday_durations:
+          type: array
+          description: >-
+            The bookable sub-day durations, in minutes, drawn from the live rate
+            card. **May be empty** — an empty array does not mean intraday is
+            forbidden, it means no sub-day tier is currently published. Read
+            `allow_intraday` for permission.
+          items: { type: integer }
+      additionalProperties: true
+    LocationSize:
+      type: object
+      required: [id, name, capacity]
+      properties:
+        id: { type: string, format: uuid }
+        name:
+          type: string
+          description: Size name as configured, e.g. `small`, `medium`, `large`.
+        capacity:
+          type: integer
+          description: >-
+            Static count of operational compartments of this size at the
+            location. NOT live availability.
+      additionalProperties: true
+    Location:
+      type: object
+      required: [id, name, address, lat, lon, sizes]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        address:
+          type: [string, "null"]
+          description: Free-text address. Frequently `null` — do not rely on it.
+        lat:
+          type: [number, "null"]
+          description: Latitude. `null` when the location has not been geocoded.
+        lon:
+          type: [number, "null"]
+          description: Longitude. `null` when the location has not been geocoded.
+        sizes:
+          type: array
+          items: { $ref: "#/components/schemas/LocationSize" }
+      additionalProperties: true
+    BootstrapOk:
+      type: object
+      required: [ok, partner_id, period_policy, granted_operations, locations, mode]
+      properties:
+        ok: { type: boolean, const: true }
+        partner_id: { type: string, format: uuid }
+        period_policy: { $ref: "#/components/schemas/PeriodPolicy" }
+        granted_operations:
+          type: array
+          items: { $ref: "#/components/schemas/GrantedOperation" }
+        locations:
+          type: array
+          description: >-
+            The locations in THIS KEY's scope. A location absent here cannot be
+            booked with this key, whatever the partner's other keys can reach.
+          items: { $ref: "#/components/schemas/Location" }
+        mode:
+          type: string
+          enum: [live, test]
+          description: >-
+            The mode of the key that authenticated this request. Added by the
+            API gateway from the verified key's own record — the underlying
+            procedure does not know which key was presented and never returns
+            this field.
+      additionalProperties: true
+    AvailabilitySize:
+      type: object
+      required: [id, name, available]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        available:
+          type: integer
+          minimum: 0
+          description: Compartments of this size free for the whole requested window.
+      additionalProperties: true
+    AvailabilityOk:
+      type: object
+      required: [ok, location_id, start, duration_minutes, end, availability]
+      properties:
+        ok: { type: boolean, const: true }
+        location_id: { type: string, format: uuid }
+        start:
+          allOf: [{ $ref: "#/components/schemas/Instant" }]
+          description: The window start actually used — your `start_time`, or now.
+        duration_minutes: { type: integer }
+        end: { $ref: "#/components/schemas/Instant" }
+        availability:
+          type: array
+          items: { $ref: "#/components/schemas/AvailabilitySize" }
+      additionalProperties: true
+    QuoteOk:
+      type: object
+      required: [ok, location_id, locker_size_id, quantity, duration_minutes, per_locker, amount, currency]
+      properties:
+        ok: { type: boolean, const: true }
+        location_id: { type: string, format: uuid }
+        locker_size_id: { type: string, format: uuid }
+        quantity: { type: integer, minimum: 1 }
+        duration_minutes: { type: integer, minimum: 1 }
+        per_locker:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: Unit price before the multi-locker discount.
+        amount:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: Total for `quantity` lockers, discount applied.
+        currency: { $ref: "#/components/schemas/Currency" }
+      additionalProperties: true
+
+    # ── booking payloads ─────────────────────────────────────────────────────
+    CreateBookingItem:
+      type: object
+      required: [locker_size_id, quantity]
+      properties:
+        locker_size_id:
+          type: string
+          format: uuid
+          description: A size id from `GET /bootstrap`.
+        quantity:
+          type: integer
+          minimum: 1
+          description: How many compartments of this size.
+      additionalProperties: false
+    CreateBookingCustomer:
+      type: object
+      description: >-
+        The end customer. **At least one of `email` and `phone` is required**;
+        the customer is resolved by whichever is supplied and a matching existing
+        customer is reused. `name` is only written when the customer row is
+        created — see the first-write-wins note.
+      properties:
+        email: { type: string, format: email }
+        phone: { type: string }
+        name: { type: string }
+      anyOf:
+        - required: [email]
+        - required: [phone]
+      additionalProperties: false
+    CreateBookingRequest:
+      type: object
+      description: >-
+        Send either `duration_minutes` or `end_time`. `duration_minutes` wins if
+        both are present.
+      required: [location_id, items, customer]
+      properties:
+        location_id:
+          type: string
+          format: uuid
+          description: A location in this key's scope.
+        items:
+          type: array
+          minItems: 1
+          description: One entry per size wanted. All lockers land on a single wall.
+          items: { $ref: "#/components/schemas/CreateBookingItem" }
+        start_time:
+          type: [string, "null"]
+          format: date-time
+          description: Window start. Omit or send `null` for now.
+        duration_minutes:
+          type: integer
+          minimum: 180
+          description: >-
+            Window length. The engine's real floor is 180 minutes even though the
+            gateway's shape check admits 60; a value in between is accepted by
+            the gateway and then refused as `invalid`. Above 1440 it must be a
+            whole multiple of 1440.
+        end_time:
+          type: string
+          format: date-time
+          description: >-
+            Alternative to `duration_minutes`; the window is derived from this
+            against `start_time` (or now) and rounded to whole minutes.
+        customer: { $ref: "#/components/schemas/CreateBookingCustomer" }
+      additionalProperties: false
+    CustomerEcho:
+      type: object
+      description: >-
+        The STORED customer this booking is attached to. If an existing customer
+        matched the email or phone you sent, this is that customer's data —
+        including a `name` you did not send.
+      required: [id, name, email, phone]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: [string, "null"] }
+        email: { type: [string, "null"] }
+        phone: { type: [string, "null"] }
+      additionalProperties: true
+    CreateBookingOk:
+      type: object
+      description: >-
+        A created — or replayed — booking. On `replayed: true` the state fields
+        describe the booking NOW, not what the original create returned.
+      required: [ok, replayed, reference, status, total, currency, access_code, customer]
+      properties:
+        ok: { type: boolean, const: true }
+        replayed:
+          type: boolean
+          description: >-
+            `false` — this request created the booking. `true` — this
+            Idempotency-Key had been used before and the booking's CURRENT state
+            is being returned.
+        reference: { $ref: "#/components/schemas/BookingReference" }
+        status: { $ref: "#/components/schemas/BookingStatus" }
+        total:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: >-
+            The booking's cumulative total. On a replay this includes any
+            extension charged since the original create.
+        currency: { $ref: "#/components/schemas/Currency" }
+        access_code:
+          description: |
+            The code that opens the compartment, or `null`.
+
+            This is genuinely two-valued rather than an optional string, and the
+            discriminating condition is **not** the request — it is the booking:
+
+            * a **six-digit string** when the booking became `active` at creation
+              (a `counterparty_collects` partner settles immediately) AND the
+              location is not a beach location;
+            * **`null`** when either of those fails — a `we_collect` booking
+              still `pending` on the payment gateway has no code minted yet, and
+              a **beach location never has one at all**, because a beach passcode
+              is set by the customer rather than issued by us.
+
+            A `null` here is not an error and is not retryable by re-creating.
+            For the pending-payment case the code appears once payment settles
+            and can then be fetched with `POST /resend-code`; for the beach case
+            there will never be one through this API.
+          oneOf:
+            - allOf: [{ $ref: "#/components/schemas/AccessCode" }]
+              title: Minted
+              description: >-
+                The booking is active at a code-issuing (non-beach) location.
+            - type: "null"
+              title: Absent
+              description: >-
+                Either the booking is `pending` awaiting payment, or the location
+                is a beach location.
+        customer: { $ref: "#/components/schemas/CustomerEcho" }
+      additionalProperties: true
+    BookingSize:
+      type: object
+      required: [id, name, quantity]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        quantity:
+          type: integer
+          minimum: 1
+          description: Compartments of this size in the booking.
+      additionalProperties: true
+    Booking:
+      type: object
+      description: >-
+        One booking, in the single shape shared by the list and the detail
+        endpoints. No access code and no customer are included.
+      required: [reference, status, location, start, end, total, currency, sizes]
+      properties:
+        reference: { $ref: "#/components/schemas/BookingReference" }
+        status: { $ref: "#/components/schemas/BookingStatus" }
+        location:
+          type: string
+          description: The location's display name. Not its id.
+        start:
+          allOf: [{ $ref: "#/components/schemas/Instant" }]
+          description: Earliest start across the booking's compartments.
+        end:
+          allOf: [{ $ref: "#/components/schemas/Instant" }]
+          description: >-
+            Latest end across the booking's compartments — this moves when the
+            booking is extended.
+        total: { $ref: "#/components/schemas/Money" }
+        currency: { $ref: "#/components/schemas/Currency" }
+        sizes:
+          type: array
+          items: { $ref: "#/components/schemas/BookingSize" }
+      additionalProperties: true
+    BookingsListOk:
+      type: object
+      required: [ok, partner_id, bookings]
+      properties:
+        ok: { type: boolean, const: true }
+        partner_id: { type: string, format: uuid }
+        bookings:
+          type: array
+          maxItems: 100
+          description: Newest first, hard-capped at 100 with no pagination.
+          items: { $ref: "#/components/schemas/Booking" }
+      additionalProperties: true
+    BookingDetailOk:
+      type: object
+      required: [ok, booking]
+      properties:
+        ok: { type: boolean, const: true }
+        booking: { $ref: "#/components/schemas/Booking" }
+      additionalProperties: true
+
+    # ── lifecycle payloads ───────────────────────────────────────────────────
+    ReferenceRequest:
+      type: object
+      required: [reference]
+      properties:
+        reference: { $ref: "#/components/schemas/BookingReference" }
+      additionalProperties: false
+    ExtendRequest:
+      type: object
+      required: [reference, extend_minutes]
+      properties:
+        reference: { $ref: "#/components/schemas/BookingReference" }
+        extend_minutes:
+          type: integer
+          minimum: 60
+          description: >-
+            Minutes to add. At least 60 and at most 525600 (365 days); the
+            resulting end must also fall within 366 days of now.
+          maximum: 525600
+      additionalProperties: false
+    CancelOk:
+      type: object
+      required: [ok, reference, status]
+      properties:
+        ok: { type: boolean, const: true }
+        reference: { $ref: "#/components/schemas/BookingReference" }
+        status:
+          type: string
+          const: cancelled
+      additionalProperties: true
+    EndOk:
+      type: object
+      required: [ok, reference, status]
+      properties:
+        ok: { type: boolean, const: true }
+        reference: { $ref: "#/components/schemas/BookingReference" }
+        status:
+          type: string
+          const: completed
+      additionalProperties: true
+    ExtendOk:
+      type: object
+      required: [ok, replayed, reference, status, end, extension_charge, currency, total]
+      properties:
+        ok: { type: boolean, const: true }
+        replayed:
+          type: boolean
+          description: >-
+            `true` when this Idempotency-Key had already been used. Unlike a
+            create replay, the payload is the stored result of the original
+            extension.
+        reference: { $ref: "#/components/schemas/BookingReference" }
+        status:
+          allOf: [{ $ref: "#/components/schemas/BookingStatus" }]
+          description: >-
+            The booking's status as it stood when the extension was accepted —
+            `pending` or `active`.
+        end:
+          allOf: [{ $ref: "#/components/schemas/Instant" }]
+          description: The booking's new end.
+        extension_charge:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: What this extension cost. Accrues its own commission entry.
+        currency: { $ref: "#/components/schemas/Currency" }
+        total:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: The booking's new cumulative total, extension included.
+      additionalProperties: true
+    AccessCodeOk:
+      type: object
+      description: >-
+        Returned by `resend-code` and `reissue-code`. `access_code` is always a
+        real code here — the cases that would have produced a null (beach
+        location, no code yet) are refused with `409 invalid_state` instead.
+      required: [ok, reference, status, access_code]
+      properties:
+        ok: { type: boolean, const: true }
+        reference: { $ref: "#/components/schemas/BookingReference" }
+        status:
+          allOf: [{ $ref: "#/components/schemas/BookingStatus" }]
+          description: The booking's status — necessarily `pending` or `active`.
+        access_code: { $ref: "#/components/schemas/AccessCode" }
+      additionalProperties: true

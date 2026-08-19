@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CityLockers Partner API (Direction A, inbound)</title>
+<meta name="description" content="Sell CityLockers locker capacity from your own product: discover locations, price a window, create and manage bookings, and hand your customer an access code.">
+<style>
+:root{--bg:#fff;--fg:#1a1d21;--muted:#5b6570;--line:#e3e7eb;--accent:#0b5fff;--code-bg:#f5f7f9;--warn-bg:#fff8e6;--warn-line:#e8b93b}
+@media (prefers-color-scheme:dark){:root{--bg:#14171a;--fg:#e8ecef;--muted:#9aa5b1;--line:#2a2f35;--accent:#7aa7ff;--code-bg:#1c2126;--warn-bg:#2a2313;--warn-line:#8a6d1f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:52rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+header{border-bottom:1px solid var(--line);padding-bottom:1.5rem;margin-bottom:2rem}
+h1{font-size:1.9rem;line-height:1.25;margin:0 0 .5rem}
+.lede{color:var(--muted);font-size:1.05rem;margin:0}
+h2{font-size:1.3rem;margin:2.5rem 0 .75rem;padding-top:.5rem}
+h3{font-size:1.05rem;margin:1.5rem 0 .5rem}
+section:first-of-type h2{margin-top:1rem}
+a{color:var(--accent)}
+code{background:var(--code-bg);padding:.12em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--code-bg);padding:1rem;border-radius:6px;overflow-x:auto;border:1px solid var(--line)}
+pre code{background:none;padding:0;font-size:.85em;line-height:1.5}
+table{border-collapse:collapse;width:100%;margin:1rem 0;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:.45rem .7rem;text-align:left;font-size:.92rem}
+th{background:var(--code-bg)}
+ul.downloads{list-style:none;padding:0;margin:0;display:grid;gap:.85rem}
+ul.downloads>li{border:1px solid var(--line);border-radius:8px;padding:.9rem 1rem}
+ul.downloads>li>p{margin:.4rem 0 0;color:var(--muted);font-size:.92rem}
+a.dl{display:flex;flex-wrap:wrap;align-items:baseline;gap:.6rem;text-decoration:none;font-weight:600}
+a.dl:hover .dl-label{text-decoration:underline}
+a.dl code{font-weight:400;font-size:.82em;color:var(--muted)}
+.callout{background:var(--warn-bg);border-left:4px solid var(--warn-line);padding:.9rem 1rem;border-radius:0 6px 6px 0;margin:1.25rem 0}
+.callout p{margin:0}
+blockquote{border-left:3px solid var(--line);margin:1rem 0;padding:.25rem 0 .25rem 1rem;color:var(--muted)}
+footer{margin-top:3.5rem;padding-top:1.25rem;border-top:1px solid var(--line);color:var(--muted);font-size:.88rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>CityLockers Partner API (Direction A, inbound)</h1>
+    <p class="lede">Sell CityLockers locker capacity from your own product: discover locations, price a window, create and manage bookings, and hand your customer an access code.</p>
+  </header>
+
+  <div class="callout">
+    <p><strong>You need an API key to call anything here.</strong> Keys are issued by your
+    CityLockers contact — there is no self-service signup, and there is no sandbox: every key
+    issued today is <code>live</code> against real lockers, real money and real customer
+    notifications.</p>
+  </div>
+
+  <h2>Downloads</h2>
+  <ul class="downloads">
+      <li>
+        <a class="dl" href="partner-api.html"><span class="dl-label">API reference</span><code>partner-api.html</code></a>
+        <p>Every endpoint, every field, every failure reason. Open this first.</p>
+      </li>
+      <li>
+        <a class="dl" href="partner-api.postman_collection.json" download><span class="dl-label">Postman collection</span><code>partner-api.postman_collection.json</code></a>
+        <p>All 11 operations, auth wired once, idempotency keys generated per send.</p>
+      </li>
+      <li>
+        <a class="dl" href="partner-api.postman_environment.json" download><span class="dl-label">Postman environment</span><code>partner-api.postman_environment.json</code></a>
+        <p>Production host. Paste your key into <code>bearerToken</code> — it ships empty.</p>
+      </li>
+      <li>
+        <a class="dl" href="partner-api.openapi.yaml" download><span class="dl-label">OpenAPI 3.1 spec</span><code>partner-api.openapi.yaml</code></a>
+        <p>The source every other file here is generated from. Point a client generator at this.</p>
+      </li>
+      <li>
+        <a class="dl" href="partner-api-bundle.zip" download><span class="dl-label">Everything, as one file</span><code>partner-api-bundle.zip</code></a>
+        <p>The four above plus a README that works offline.</p>
+      </li>
+  </ul>
+
+    <section>
+      <h2>The envelope</h2>
+<p>Every response body is a JSON object carrying <code>ok</code>.</p>
+<ul>
+<li><code>ok: true</code> — the operation succeeded. The rest of the object is the
+operation&#39;s payload.</li>
+<li><code>ok: false</code> — the operation was refused. <code>reason</code> is always present and is
+a machine-readable string from the vocabulary under <em>Reason codes</em>.
+<code>error</code> is sometimes
+present and is a human-readable sentence; <strong>branch on <code>reason</code>, never on
+<code>error</code></strong>, and never on the HTTP status alone.</li>
+</ul>
+<p>There is no separate error object and no <code>errors</code> array. A refusal is never
+delivered as a bare HTTP status with an empty body.</p>
+    </section>
+    <section>
+      <h2>Getting started</h2>
+<ol>
+<li><strong>Ask your CityLockers contact for a partner API key.</strong> Keys are issued by
+us; there is no self-service signup. The key is what defines which
+locations you may sell, which operations you may call, and which booking
+windows you are allowed to offer.</li>
+<li><strong>Call <code>GET /bootstrap</code> once, at startup, and configure your UI from what
+it returns</strong> — your locations, the locker sizes offered at each, your
+period policy, your granted operations, and the mode of the key you hold.
+<strong>Do not hard-code any of it.</strong> Every one of those is a property of the
+key and can change without a release on your side.</li>
+<li><strong>Price a window with <code>GET /quote</code> and check stock with <code>GET /availability</code></strong> before you show a price or a &quot;book&quot; button. Neither
+creates anything.</li>
+<li><strong>Create the booking with <code>POST /bookings</code>,</strong> carrying an
+<code>Idempotency-Key</code>. You get back a booking <code>reference</code> and, where one
+exists, the customer&#39;s <code>access_code</code>.</li>
+<li><strong>Manage it afterwards</strong> with <code>GET /booking</code>, <code>POST /extend</code>,
+<code>POST /cancel</code>, <code>POST /end</code>, <code>POST /resend-code</code> and
+<code>POST /reissue-code</code>.</li>
+</ol>
+<p><strong>There is one host and it is production.</strong> A <code>test</code> key mode exists in the
+data model, but the partner sandbox it refers to <strong>has not been built</strong>, so
+no <code>test</code> key can currently be issued and every key you are given is <code>live</code>
+against real lockers, real money and real customer notifications. Ask for a
+throwaway location rather than assuming a safe environment exists.</p>
+<p><strong>Keep the key on your server.</strong> Never put it in a browser, a mobile app, a
+URL or a repository. It is a bearer credential: whoever holds it is you.</p>
+    </section>
+    <section>
+      <h2>The flow, in order</h2>
+<pre><code>bootstrap ──▶ availability ──▶ quote ──▶ create ──▶ (extend | cancel | end)
+   once          per search     per      per            per booking
+ at startup                    window   basket
+</code></pre>
+<p><code>bootstrap</code> is a startup call, not a per-request one. <code>availability</code> and
+<code>quote</code> answer different questions and neither is authoritative: <strong>create is
+the only gate</strong>. A window <code>availability</code> happily counts and <code>quote</code> happily
+prices can still be refused by create — <code>period_not_allowed</code> if it falls
+outside your key&#39;s period policy, <code>unavailable</code> if a concurrent booking took
+the compartment first, <code>invalid</code> if it is under the engine&#39;s real floor.
+Treat a create refusal as normal control flow, not as an exception.</p>
+    </section>
+    <section>
+      <h2>Booking windows: two shapes, and a floor that is not where you expect</h2>
+<p><strong>Send either <code>duration_minutes</code> or <code>end_time</code>, not both.</strong> They are
+alternative spellings of the same window and create accepts both:</p>
+<ul>
+<li><code>duration_minutes</code> — an integer count of minutes from <code>start_time</code>. If you
+send both fields, <strong><code>duration_minutes</code> wins</strong> and <code>end_time</code> is ignored.</li>
+<li><code>end_time</code> — an ISO-8601 instant. The window is then derived from
+<code>start_time</code> (or from now, if you omit <code>start_time</code>).</li>
+</ul>
+<p>Omit <code>start_time</code> to mean &quot;now&quot;. <code>GET /availability</code> and <code>GET /quote</code> take
+only <code>duration_minutes</code>, so if your UI works in end times you convert before
+you price.</p>
+<p><strong>The floor is 180 minutes, not the 60 the edge function accepts.</strong> This is
+the single most common way a first integration fails, and it fails <em>late</em>:
+the edge function rejects anything under 60 minutes outright, but the booking
+engine&#39;s smallest chip is <strong>180 minutes</strong>, so a 60–179 minute request passes
+edge validation, reaches the engine, and comes back <code>400 invalid</code> with no
+hint that duration was the problem. <strong>If you offer sub-3-hour windows in your
+UI, they will all fail.</strong> Above a day, the window must be a whole number of
+1440-minute blocks or it is <code>invalid_duration</code>.</p>
+    </section>
+
+  <section>
+    <h2>Everything else</h2>
+    <p>The four sections above are the ones a first integration gets wrong. The
+    <a href="partner-api.html">full API reference</a> carries the rest — every endpoint, every
+    request and response field, the complete <code>reason</code> vocabulary with the status each
+    one arrives on, rate limiting, and the behaviours that surprise integrators.</p>
+  </section>
+
+  <footer>
+    <p>Generated from <code>partner-api.openapi.yaml</code>, version 1.0.0. This
+    page, the reference, the collection and the README are all built from that one file, so they
+    cannot disagree with each other.</p>
+  </footer>
+</div>
+</body>
+</html>
