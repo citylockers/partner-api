@@ -415,8 +415,11 @@ paths:
         service. It is not live availability; a size can show `capacity: 12` and
         have nothing free right now. Use `GET /availability` for that.
 
-        Operating hours are **not** returned. Nothing in this response describes
-        when a location is open.
+        `locations[].opening_hours` is when a location is open, as **free text** —
+        not a structured schedule. Show it; do not parse it. The value is
+        EFFECTIVE: the location's own hours where it has them, otherwise its
+        parent building's. `null` means neither is set, which is *unknown*, not
+        *closed*. The key is always present. See the `Location` schema.
       x-grant-key: locations
       x-idempotency-key: not-read
       responses:
@@ -471,6 +474,7 @@ paths:
                         address: null
                         lat: null
                         lon: null
+                        opening_hours: null
                         sizes:
                           - { id: "33333333-3333-4333-8333-333333333333", name: "large", capacity: 2 }
                           - { id: "44444444-4444-4444-8444-444444444444", name: "medium", capacity: 1 }
@@ -2022,7 +2026,7 @@ components:
       additionalProperties: true
     Location:
       type: object
-      required: [id, name, address, lat, lon, sizes]
+      required: [id, name, address, lat, lon, sizes, opening_hours]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -2038,6 +2042,21 @@ components:
         sizes:
           type: array
           items: { $ref: "#/components/schemas/LocationSize" }
+        opening_hours:
+          type: [string, "null"]
+          description: >-
+            When this location is open, as FREE TEXT — not a structured schedule.
+            Do not parse it; show it. Expect shapes like `24/7`,
+            `Daily 08:00–22:00` or `Mon–Fri 09:00–18:00, Sat 10:00–16:00`,
+            in whatever wording and language the host supplied.
+
+
+            The value is EFFECTIVE: the location's own hours where it has them,
+            otherwise the parent building's, following the same
+            null-means-inherit rule the rest of the location content uses.
+            `null` means neither is set — the hours are unknown, not "closed".
+            Added in v0.263.0; the key is always present.
+          example: "24/7"
       additionalProperties: true
     BootstrapOk:
       type: object
