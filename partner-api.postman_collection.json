@@ -1145,7 +1145,7 @@
           "request": {
             "name": "List this key's bookings",
             "description": {
-              "content": "**Grant required on your API key:** `bookings.list` — visible on `GET /bootstrap` under `grants`. Without it this call returns `403 forbidden`.\n\n**Alias:** `GET` with no trailing path segment (`GET /partner-bridge`) resolves to this same operation. It is an alias, not a separate endpoint, and is deliberately not duplicated as its own request here.\n\n---\n\nEvery booking this partner has created through the API, newest first,\n**capped at 100 rows**. There is no pagination, no cursor and no total\ncount; the 101st-oldest booking is simply not returned. Each row has the\nsame object shape `GET /booking` returns for one booking.\n\nAccess codes are never included here — that is `POST /resend-code`'s job\nand it is granted separately.\n",
+              "content": "**Grant required on your API key:** `bookings.list` — visible on `GET /bootstrap` under `grants`. Without it this call returns `403 forbidden`.\n\n**Alias:** `GET` with no trailing path segment (`GET /partner-bridge`) resolves to this same operation. It is an alias, not a separate endpoint, and is deliberately not duplicated as its own request here.\n\n---\n\nThe bookings this partner has created through the API, newest first,\n**one page at a time** (0.269.0). Each row has the same object shape\n`GET /booking` returns for one booking, and now carries `booking_type`\nso a `test`-key booking can be told from a live one.\n\n**Paging.** Up to `limit` rows (default and maximum 100). When more\nremain, `has_more` is `true` and `next_cursor` is set; pass it back as\n`cursor` to fetch the next page. The cursor is **opaque** — do not\nparse, construct or store it beyond the next request. It is a keyset\nover the request's creation time AND its id, so a page boundary that\nfalls between two bookings created in the same instant neither skips\nnor repeats a row. A cursor that does not decode is `400 invalid`.\n\n**Filters.** `status` matches the booking's lifecycle state exactly;\n`mode=test` returns only bookings made with a test key (or by a tester\ncustomer); `mode=live` returns everything else.\n\nAccess codes are never included here — that is `POST /resend-code`'s job\nand it is granted separately.\n",
               "type": "text/markdown"
             },
             "url": {
@@ -1155,7 +1155,32 @@
               "host": [
                 "{{baseUrl}}"
               ],
-              "query": [],
+              "query": [
+                {
+                  "disabled": false,
+                  "key": "status",
+                  "value": "active",
+                  "description": "Only bookings in exactly this lifecycle state."
+                },
+                {
+                  "disabled": false,
+                  "key": "mode",
+                  "value": "test",
+                  "description": "`test` — only bookings stamped `booking_type: test` (made with a test key, or by a tester customer). `live` — everything else. Omit for both."
+                },
+                {
+                  "disabled": false,
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Page size, 1–100. Default 100."
+                },
+                {
+                  "disabled": false,
+                  "key": "cursor",
+                  "value": "MjAyNi0wOS0wNiAxMDowMDowMCswMHxlMjY5MDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDA=",
+                  "description": "The `next_cursor` of the previous page, verbatim. Opaque; a value that does not decode is refused `400 invalid`."
+                }
+              ],
               "variable": []
             },
             "header": [
@@ -1169,8 +1194,8 @@
           },
           "response": [
             {
-              "id": "f3581450-ea18-57ce-a71d-2663ced96646",
-              "name": "The partner's bookings, newest first, at most 100.",
+              "id": "3400d4e1-44d5-5937-972b-4a3acfc4e3e5",
+              "name": "One page of the partner's bookings, newest first.",
               "originalRequest": {
                 "url": {
                   "path": [
@@ -1179,7 +1204,24 @@
                   "host": [
                     "{{baseUrl}}"
                   ],
-                  "query": [],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active"
+                    },
+                    {
+                      "key": "mode",
+                      "value": "test"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    },
+                    {
+                      "key": "cursor",
+                      "value": "MjAyNi0wOS0wNiAxMDowMDowMCswMHxlMjY5MDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDA="
+                    }
+                  ],
                   "variable": []
                 },
                 "header": [
@@ -1207,7 +1249,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"ok\": true,\n  \"partner_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"bookings\": []\n}",
+              "body": "{\n  \"ok\": true,\n  \"partner_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"bookings\": [],\n  \"has_more\": false,\n  \"next_cursor\": null\n}",
               "cookie": [],
               "_postman_previewlanguage": "json"
             },
@@ -1222,7 +1264,24 @@
                   "host": [
                     "{{baseUrl}}"
                   ],
-                  "query": [],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active"
+                    },
+                    {
+                      "key": "mode",
+                      "value": "test"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    },
+                    {
+                      "key": "cursor",
+                      "value": "MjAyNi0wOS0wNiAxMDowMDowMCswMHxlMjY5MDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDA="
+                    }
+                  ],
                   "variable": []
                 },
                 "header": [
@@ -1265,7 +1324,24 @@
                   "host": [
                     "{{baseUrl}}"
                   ],
-                  "query": [],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active"
+                    },
+                    {
+                      "key": "mode",
+                      "value": "test"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    },
+                    {
+                      "key": "cursor",
+                      "value": "MjAyNi0wOS0wNiAxMDowMDowMCswMHxlMjY5MDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDA="
+                    }
+                  ],
                   "variable": []
                 },
                 "header": [
@@ -1308,7 +1384,24 @@
                   "host": [
                     "{{baseUrl}}"
                   ],
-                  "query": [],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active"
+                    },
+                    {
+                      "key": "mode",
+                      "value": "test"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    },
+                    {
+                      "key": "cursor",
+                      "value": "MjAyNi0wOS0wNiAxMDowMDowMCswMHxlMjY5MDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDA="
+                    }
+                  ],
                   "variable": []
                 },
                 "header": [
@@ -1351,7 +1444,24 @@
                   "host": [
                     "{{baseUrl}}"
                   ],
-                  "query": [],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active"
+                    },
+                    {
+                      "key": "mode",
+                      "value": "test"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    },
+                    {
+                      "key": "cursor",
+                      "value": "MjAyNi0wOS0wNiAxMDowMDowMCswMHxlMjY5MDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDA="
+                    }
+                  ],
                   "variable": []
                 },
                 "header": [
@@ -1666,8 +1776,8 @@
               "_postman_previewlanguage": "json"
             },
             {
-              "id": "7de9ffff-7d20-56ef-87d6-ba17194a7ea5",
-              "name": "* `unavailable` — no wall at the location can satisfy every requested\n  size and quantity for the window, or the resolved wall carries no\n  price model, or a concurrent booking took the compartment first.\n* `in_progress` — this Idempotency-Key is currently being processed\n  by another in-flight request. Retry after a short delay; do not\n  change the key.\n",
+              "id": "ea61a6d7-0b40-5c3f-8b3e-c7b3b73d93e6",
+              "name": "* `unavailable` — with `cause` (0.285.0): `no_capacity` when no wall\n  at the location can satisfy every requested size and quantity for\n  the window, `no_price_model` when the resolved wall carries no\n  price model (our gap, contact CityLockers), `conflict` when a\n  concurrent booking took the compartment first (retry).\n* `in_progress` — this Idempotency-Key is currently being processed\n  by another in-flight request. Retry after a short delay; do not\n  change the key.\n",
               "originalRequest": {
                 "url": {
                   "path": [
@@ -1718,7 +1828,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"ok\": false,\n  \"reason\": \"unavailable\"\n}",
+              "body": "{\n  \"ok\": false,\n  \"reason\": \"unavailable\",\n  \"cause\": \"no_capacity\"\n}",
               "cookie": [],
               "_postman_previewlanguage": "json"
             },
@@ -1922,7 +2032,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"ok\": true,\n  \"booking\": {\n    \"reference\": \"CL-EXAMPLE-0001\",\n    \"status\": \"active\",\n    \"location\": \"Example Location\",\n    \"start\": \"2026-08-15T19:32:21Z\",\n    \"end\": \"2026-08-16T03:32:21Z\",\n    \"total\": 9,\n    \"currency\": \"AED\",\n    \"sizes\": [\n      {\n        \"id\": \"33333333-3333-4333-8333-333333333333\",\n        \"name\": \"large\",\n        \"quantity\": 1\n      }\n    ]\n  }\n}",
+              "body": "{\n  \"ok\": true,\n  \"booking\": {\n    \"reference\": \"CL-EXAMPLE-0001\",\n    \"status\": \"active\",\n    \"location\": \"Example Location\",\n    \"start\": \"2026-08-15T19:32:21Z\",\n    \"end\": \"2026-08-16T03:32:21Z\",\n    \"total\": 9,\n    \"currency\": \"AED\",\n    \"sizes\": [\n      {\n        \"id\": \"33333333-3333-4333-8333-333333333333\",\n        \"name\": \"large\",\n        \"quantity\": 1\n      }\n    ],\n    \"overstay\": {\n      \"state\": \"overdue\",\n      \"amount\": 4,\n      \"currency\": \"AED\",\n      \"minutes\": 37,\n      \"unpriced\": false,\n      \"grace_end\": \"2026-08-16T03:47:21Z\"\n    }\n  }\n}",
               "cookie": [],
               "_postman_previewlanguage": "json"
             },
@@ -4602,7 +4712,7 @@
     "name": "CityLockers Partner API (Direction A, inbound)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "description": {
-      "content": "The Direction A partner API lets a partner sell CityLockers locker capacity\ninside its own product. Every call is authenticated with a partner API key,\nevery result is scoped to the partner that key belongs to, and every response\n— success or failure — uses the same envelope.\n\n## The envelope\n\nEvery response body is a JSON object carrying `ok`.\n\n* `ok: true` — the operation succeeded. The rest of the object is the\n  operation's payload.\n* `ok: false` — the operation was refused. `reason` is always present and is\n  a machine-readable string from the vocabulary under *Reason codes*.\n  `error` is sometimes\n  present and is a human-readable sentence; **branch on `reason`, never on\n  `error`**, and never on the HTTP status alone.\n\nThere is no separate error object and no `errors` array. A refusal is never\ndelivered as a bare HTTP status with an empty body.\n\n## Getting started\n\n1. **Ask your CityLockers contact for a partner API key.** Keys are issued by\n   us; there is no self-service signup. The key is what defines which\n   locations you may sell, which operations you may call, and which booking\n   windows you are allowed to offer.\n2. **Call `GET /bootstrap` once, at startup, and configure your UI from what\n   it returns** — your locations, the locker sizes offered at each, your\n   period policy, your granted operations, and the mode of the key you hold.\n   **Do not hard-code any of it.** Every one of those is a property of the\n   key and can change without a release on your side.\n3. **Price a window with `GET /quote` and check stock with `GET\n   /availability`** before you show a price or a \"book\" button. Neither\n   creates anything.\n4. **Create the booking with `POST /bookings`,** carrying an\n   `Idempotency-Key`. You get back a booking `reference` and, where one\n   exists, the customer's `access_code`.\n5. **Manage it afterwards** with `GET /booking`, `POST /extend`,\n   `POST /cancel`, `POST /end`, `POST /resend-code` and\n   `POST /reissue-code`.\n\n**There is one host and it is production.** A `test` key mode exists in the\ndata model, but the partner sandbox it refers to **has not been built**, so\nno `test` key can currently be issued and every key you are given is `live`\nagainst real lockers, real money and real customer notifications. Ask for a\nthrowaway location rather than assuming a safe environment exists.\n\n**Keep the key on your server.** Never put it in a browser, a mobile app, a\nURL or a repository. It is a bearer credential: whoever holds it is you.\n\n## The flow, in order\n\n```\nbootstrap ──▶ availability ──▶ quote ──▶ create ──▶ (extend | cancel | end)\n   once          per search     per      per            per booking\n at startup                    window   basket\n```\n\n`bootstrap` is a startup call, not a per-request one. `availability` and\n`quote` answer different questions and neither is authoritative: **create is\nthe only gate**. A window `availability` happily counts and `quote` happily\nprices can still be refused by create — `period_not_allowed` if it falls\noutside your key's period policy, `unavailable` if a concurrent booking took\nthe compartment first, `invalid` if it is under the engine's real floor.\nTreat a create refusal as normal control flow, not as an exception.\n\n## Routing: dispatch on the trailing path segment\n\nThe API is one Edge Function invoked at `/partner-bridge`. The sub-route is\nthe **trailing path segment** of the request URL, and the method then selects\nthe operation (`GET /bookings` lists, `POST /bookings` creates). This is\ndescribed here faithfully rather than reshaped.\n\nTwo consequences a generated client must respect:\n\n1. **A bare `POST` with no path segment resolves to `bookings` (create).**\n   `POST /partner-bridge` and `POST /partner-bridge/bookings` are the same\n   operation. This is documented below as the path `/` and was proven live —\n   a real second booking was created through a request with no trailing\n   segment at all. It is an alias, not a twelfth endpoint.\n2. **An unrecognised segment, or a recognised segment with the wrong method,\n   returns `404 not_found`** — the same reason string a missing booking\n   reference produces. A 404 therefore does not by itself mean \"no such\n   booking\".\n\n## Authentication\n\n`Authorization: Bearer <key>` on every call, including the ones that can fail\nbefore the key is checked (see the create endpoint's security note).\n\nA raw key is `kpk_<mode>_<8hex>_<64hex>`, e.g.\n`kpk_live_1a2b3c4d_<64 hex characters>`. Only the fourth segment is secret.\nThe first three segments together are the key's non-secret **prefix**\n(`kpk_live_1a2b3c4d`); it is what the server stores alongside the SHA-256\nhash of the full key, what the rate limiter buckets on, and the only part\nsafe to quote in a support ticket or a log line.\n\n`mode` is a property of the key itself, `live` or `test`, and is the source\nof truth for which environment the credential belongs to. It is surfaced to\nyou on `GET /bootstrap` as the top-level `mode` field. Only `live` keys are\nminted today; the `test` sandbox is a separate, not-yet-built partner\nenvironment, so a `test` key cannot currently be issued.\n\n**Legacy two-segment keys (`kpk_<8hex>_<64hex>`) no longer authenticate.**\nVerification derives the prefix from the first three segments, so a\ntwo-segment key yields a prefix that matches no stored row and is rejected\nas `unauthorized`.\n\nVerification hashes the full raw key with SHA-256 and constant-time compares\nit against the stored hash, scoped to an **active key belonging to an active\npartner**. Anything else — no key, malformed key, revoked key, suspended\npartner — is `401 unauthorized`.\n\n## Rate limiting\n\n60 requests per minute per key prefix, over-limit → `429 rate_limited`. The\nlimiter is an in-process token bucket: it resets when the function instance\ncold-starts and is not shared across instances, so the effective limit is a\nfloor, not a guarantee. Treat 429 as retryable with backoff. This behaviour\nis expected to be replaced by a durable shared counter; do not build a client\nthat depends on the current leniency.\n\n## Idempotency\n\n`Idempotency-Key` is **required on the two operations that move money**:\n`POST /bookings` (create) and `POST /extend`. It is not read on any other\nendpoint. A missing or blank header is `400 invalid` before any work is done.\n\nReplaying a key that has already been used returns the earlier request's\noutcome instead of acting twice.\n\n**A replay returns LIVE CURRENT STATE, not a frozen echo of the original\nresponse.** This is the single most important thing to understand about\nreplay on this API, and it was proven live: a create replayed after the\nbooking had been extended and then cancelled came back with\n`status: \"cancelled\"` and `total: 18`, where the original create had returned\n`status: \"active\"` and `total: 9`. The create replay branch re-reads the\nbooking and customer rows at replay time. So on a create replay,\n`status`, `total` and `access_code` describe the booking **now**;\nonly `reference` and `replayed: true` are stable facts about the original\nrequest. (`POST /extend` differs: its replay returns the stored result\nobject of the original extension, stamped `replayed: true`.)\n\nA replay of a request that was *rejected* returns the original rejection\nreason with the original status. A replay that arrives while the first\nrequest is still in flight returns `409 in_progress`.\n\n## Booking windows: two shapes, and a floor that is not where you expect\n\n**Send either `duration_minutes` or `end_time`, not both.** They are\nalternative spellings of the same window and create accepts both:\n\n* `duration_minutes` — an integer count of minutes from `start_time`. If you\n  send both fields, **`duration_minutes` wins** and `end_time` is ignored.\n* `end_time` — an ISO-8601 instant. The window is then derived from\n  `start_time` (or from now, if you omit `start_time`).\n\nOmit `start_time` to mean \"now\". `GET /availability` and `GET /quote` take\nonly `duration_minutes`, so if your UI works in end times you convert before\nyou price.\n\n**The floor is 180 minutes, not the 60 the edge function accepts.** This is\nthe single most common way a first integration fails, and it fails *late*:\nthe edge function rejects anything under 60 minutes outright, but the booking\nengine's smallest chip is **180 minutes**, so a 60–179 minute request passes\nedge validation, reaches the engine, and comes back `400 invalid` with no\nhint that duration was the problem. **If you offer sub-3-hour windows in your\nUI, they will all fail.** Above a day, the window must be a whole number of\n1440-minute blocks or it is `invalid_duration`.\n\n## Reason codes, and why they are documented per endpoint\n\nThe full reason vocabulary the code can emit is:\n\n| reason | usual status | meaning |\n|---|---|---|\n| `unauthorized` | 401, sometimes 403 | no usable key, or the partner is not active |\n| `capability` | 403 | the partner lacks the *inbound* direction capability |\n| `out_of_scope` | 403 | the location is not in this key's scope |\n| `not_permitted` | 403 | the partner is not granted this operation |\n| `not_found` | 404 | no such booking for this partner, or no such route |\n| `unavailable` | 409 | nothing free / nothing priceable for the request |\n| `in_progress` | 409 | a concurrent replay of the same Idempotency-Key |\n| `invalid_state` | 409 | the booking is not in a state this operation accepts |\n| `window_not_expired` | 409 | see the note below — **unreachable today** |\n| `invalid` | 400 | malformed or missing input |\n| `invalid_duration` | 400 | the duration is structurally wrong |\n| `period_not_allowed` | 400 | the partner's period policy forbids this window |\n| `rate_limited` | 429 | over the per-key request budget |\n| `server_error` | 500 | an internal failure; retry is reasonable |\n\n**`reason` alone does not determine the HTTP status, which is why this spec\nmodels reason→status per endpoint per branch instead of publishing one global\ntable.** The concrete case: `unauthorized` is **401** when it comes from a\nroute's own key-verification branch (the common case — no key, bad key), and\n**403** when it is returned by a wrapper RPC's *partner-not-active* branch\nand mapped by the generic reason→status mapper. The two have never been\nobserved colliding, because key verification already scopes to an active\npartner, so the 403 flavour is only reachable if a partner is deactivated in\nthe window between verification and the operation's own read. It is\nnonetheless a real branch in shipped code, and a client keyed on a single\nglobal `reason`→status table will mis-handle it. Each operation below lists\nonly the reasons that operation can actually produce, and each response says\nwhich branch produces it.\n\nTwo further notes on the enum:\n\n* **`window_not_expired` is unreachable.** It is documented here for\n  completeness of the vocabulary only. The window-expiry guard on ending a\n  booking was **deleted** in migration `20260728140000_end_booking_early.sql`,\n  whose own header records that the reason string was left in the status maps\n  deliberately, to avoid needless API churn. `POST /end` completes a live\n  booking immediately, before its window closes — proven live. It is **not**\n  listed as a response of `POST /end` anywhere in this document, and it will\n  only become reachable if that deleted guard is reinstated.\n* **`period_not_allowed` is real and was missing from the earlier written\n  accounts of this API.** `POST /bookings` returns it (as a `400`) when the\n  requested window falls outside the partner's own intraday/multiday policy.\n\n## Grant vocabulary\n\nA key's partner holds a set of granted operations. `GET /bootstrap` returns\nthem as `granted_operations`, an array of objects — `{ key, kind, label }`,\n**not** an array of bare strings. The `key` values are the grant keys, and\neach callable endpoint below names the one it requires in `x-grant-key`.\n\n| grant key | kind | endpoint |\n|---|---|---|\n| `locations` | read | `GET /bootstrap` |\n| `availability` | read | `GET /availability` |\n| `quote` | read | `GET /quote` |\n| `bookings.list` | read | `GET /bookings` |\n| `booking.read` | read | `GET /booking` |\n| `booking.create` | write | `POST /bookings` (and bare `POST /`) |\n| `booking.cancel` | write | `POST /cancel` |\n| `booking.end` | write | `POST /end` |\n| `booking.extend` | write | `POST /extend` |\n| `booking.resend_code` | write | `POST /resend-code` |\n| `booking.reissue_code` | write | `POST /reissue-code` |\n\nCalling an endpoint whose grant the partner does not hold is\n`403 not_permitted`. A grant is checked inside the operation, so a missing\ngrant is reported after authentication, never instead of it.\n\nThree further operation keys exist in the server-side registry but are **not\nbuilt** and have no endpoint: `booking.open`, `booking.add_lockers`,\n`booking.overstay`. They are listed under `x-planned-operations` at the root\nof this document so a client can recognise the strings, and they deliberately\nappear nowhere as a path. If one of them shows up in your\n`granted_operations`, there is still nothing to call.\n\n## Behaviours that surprise integrators\n\n* **Customer identity is first-write-wins by email.** Creating a booking\n  resolves the customer by email (or phone) and reuses the existing row if\n  one matches. A later create under the same email with a *different* `name`\n  does **not** update the stored name, and the response echoes the stored\n  one. Proven live: a create sending `\"E2E Rerun B\"` came back with the\n  earlier `\"E2E Rerun A\"`. Do not use the returned `customer.name` to confirm\n  what you sent.\n* **`access_code` is not always present on a create.** See the create\n  response schema — it is `string` or `null`, and the two conditions that\n  produce `null` are named there.\n* **`resend-code` and `reissue-code` do not email the customer.** They return\n  the code in the response body and nothing else leaves the platform.\n  Delivering it to the end customer is the partner's job. (`reissue-code`\n  additionally enqueues a device event so the physical keypad learns the new\n  code; until that is consumed, the OLD code still opens the door.)\n* **`GET /bookings` is capped at 100 rows, newest first, with no\n  pagination.** There is no cursor, no `offset` and no total count.\n* **Times are UTC ISO-8601 instants.** Multi-day quoting anchors on the\n  Asia/Dubai business date, which can make a multi-day quote indicative\n  rather than exact; a create charges from the real booking start.\n\n## Data handling\n\nCreating a booking sends us your customer's contact details — an email\naddress, or a phone number, and optionally a name — because a booking\nresolves to a customer record on our side and a confirmation notification is\nsent to that address. That makes both parties handlers of personal data under\nthe **UAE Personal Data Protection Law (Federal Decree-Law No. 45 of 2021)**,\nand a short data-handling understanding forms part of the partner agreement.\nAgree it before you send live traffic, not after.\n\nPractically, three rules:\n\n* **Customer data goes in the request body, over HTTPS, never in a URL.** No\n  endpoint here takes a customer identifier as a query parameter, and a URL\n  is logged in places a body is not.\n* **Send the minimum that identifies the customer.** One of `email` or\n  `phone` is required; `name` is optional and is only used for the booking\n  record.\n* **Customer identity is first-write-wins by email** — see *Behaviours that\n  surprise integrators*. The record we keep may not carry the name you sent,\n  so do not treat the echoed `customer` object as confirmation of what you\n  submitted.\n\n## About the examples\n\n**Every example in this document is illustrative.** The response examples are\nreproduced from a real end-to-end run against the dev branch project on\n2026-08-15, with every identifier, address, code and reference replaced by an\nobviously synthetic placeholder. No example contains a real customer email, a\nreal access code, a real partner key or a real booking reference. Do not\ntreat any identifier here as callable, and do not copy an example UUID into a\nrequest.\n\n\nContact Support:\n Name: CityLockers partner integrations",
+      "content": "The Direction A partner API lets a partner sell CityLockers locker capacity\ninside its own product. Every call is authenticated with a partner API key,\nevery result is scoped to the partner that key belongs to, and every response\n— success or failure — uses the same envelope.\n\n## The envelope\n\nEvery response body is a JSON object carrying `ok`.\n\n* `ok: true` — the operation succeeded. The rest of the object is the\n  operation's payload.\n* `ok: false` — the operation was refused. `reason` is always present and is\n  a machine-readable string from the vocabulary under *Reason codes*.\n  `error` is sometimes\n  present and is a human-readable sentence; **branch on `reason`, never on\n  `error`**, and never on the HTTP status alone.\n\nThere is no separate error object and no `errors` array. A refusal is never\ndelivered as a bare HTTP status with an empty body.\n\n## Getting started\n\n1. **Ask your CityLockers contact for a partner API key.** Keys are issued by\n   us; there is no self-service signup. The key is what defines which\n   locations you may sell, which operations you may call, and which booking\n   windows you are allowed to offer.\n2. **Call `GET /bootstrap` once, at startup, and configure your UI from what\n   it returns** — your locations, the locker sizes offered at each, your\n   period policy, your granted operations, and the mode of the key you hold.\n   **Do not hard-code any of it.** Every one of those is a property of the\n   key and can change without a release on your side.\n3. **Price a window with `GET /quote` and check stock with `GET\n   /availability`** before you show a price or a \"book\" button. Neither\n   creates anything.\n4. **Create the booking with `POST /bookings`,** carrying an\n   `Idempotency-Key`. You get back a booking `reference` and, where one\n   exists, the customer's `access_code`.\n5. **Manage it afterwards** with `GET /booking`, `POST /extend`,\n   `POST /cancel`, `POST /end`, `POST /resend-code` and\n   `POST /reissue-code`.\n\n**You hold two keys, and the difference is the key, not the host.** A `live`\nkey transacts against your real scoped locations: real lockers, real money,\nreal customer notifications, and a commission entry on our ledger for every\ncreate and every extend. A `test` key (0.268.0) uses the **same endpoints on\nthe same host** and is scoped to a shared **fixture location** — inventory\nthat is not sold to anyone. A booking made with a test key is stamped\n`booking_type = 'test'` (it never appears in our staff booking views) and\n**accrues no commission**: neither its create nor any later extend writes a\nledger row. Everything else — availability, quote, the access code, cancel,\nend, the idempotency contract — behaves exactly as live. Integrate against\nthe test key; go live by swapping the credential. Read which one you hold\nfrom `GET /bootstrap`'s `mode` field.\n\n**Keep the key on your server.** Never put it in a browser, a mobile app, a\nURL or a repository. It is a bearer credential: whoever holds it is you.\n\n## The flow, in order\n\n```\nbootstrap ──▶ availability ──▶ quote ──▶ create ──▶ (extend | cancel | end)\n   once          per search     per      per            per booking\n at startup                    window   basket\n```\n\n`bootstrap` is a startup call, not a per-request one. `availability` and\n`quote` answer different questions and neither is authoritative: **create is\nthe only gate**. A window `availability` happily counts and `quote` happily\nprices can still be refused by create — `period_not_allowed` if it falls\noutside your key's period policy, `unavailable` if a concurrent booking took\nthe compartment first, `invalid` if it is under the engine's real floor.\nTreat a create refusal as normal control flow, not as an exception.\n\n## Routing: dispatch on the trailing path segment\n\nThe API is one Edge Function invoked at `/partner-bridge`. The sub-route is\nthe **trailing path segment** of the request URL, and the method then selects\nthe operation (`GET /bookings` lists, `POST /bookings` creates). This is\ndescribed here faithfully rather than reshaped.\n\nTwo consequences a generated client must respect:\n\n1. **A bare `POST` with no path segment resolves to `bookings` (create).**\n   `POST /partner-bridge` and `POST /partner-bridge/bookings` are the same\n   operation. This is documented below as the path `/` and was proven live —\n   a real second booking was created through a request with no trailing\n   segment at all. It is an alias, not a twelfth endpoint.\n2. **An unrecognised segment, or a recognised segment with the wrong method,\n   returns `404 not_found`** — the same reason string a missing booking\n   reference produces. A 404 therefore does not by itself mean \"no such\n   booking\".\n\n## Authentication\n\n`Authorization: Bearer <key>` on every call, including the ones that can fail\nbefore the key is checked (see the create endpoint's security note).\n\nA raw key is `kpk_<mode>_<8hex>_<64hex>`, e.g.\n`kpk_live_1a2b3c4d_<64 hex characters>`. Only the fourth segment is secret.\nThe first three segments together are the key's non-secret **prefix**\n(`kpk_live_1a2b3c4d`); it is what the server stores alongside the SHA-256\nhash of the full key, what the rate limiter buckets on, and the only part\nsafe to quote in a support ticket or a log line.\n\n`mode` is a property of the key itself, `live` or `test`, and is the source\nof truth for what the credential does. It is surfaced to you on\n`GET /bootstrap` as the top-level `mode` field. Both modes are minted\n(0.268.0). The mode is threaded server-side from the verified key into the\ncreate and extend procedures: a `test` key's bookings are stamped\n`booking_type = 'test'` and accrue no commission; a `live` key's are\n`standard` and do. Nothing in a request body can change a key's mode.\n\n**Legacy two-segment keys (`kpk_<8hex>_<64hex>`) no longer authenticate.**\nVerification derives the prefix from the first three segments, so a\ntwo-segment key yields a prefix that matches no stored row and is rejected\nas `unauthorized`.\n\nVerification hashes the full raw key with SHA-256 and constant-time compares\nit against the stored hash, scoped to an **active key belonging to an active\npartner**. Anything else — no key, malformed key, revoked key, suspended\npartner — is `401 unauthorized`.\n\n## Rate limiting\n\n60 requests per minute per key prefix, over-limit → `429 rate_limited`. The\nlimiter is an in-process token bucket: it resets when the function instance\ncold-starts and is not shared across instances, so the effective limit is a\nfloor, not a guarantee. Treat 429 as retryable with backoff. This behaviour\nis expected to be replaced by a durable shared counter; do not build a client\nthat depends on the current leniency.\n\n## Idempotency\n\n`Idempotency-Key` is **required on the two operations that move money**:\n`POST /bookings` (create) and `POST /extend`. It is not read on any other\nendpoint. A missing or blank header is `400 invalid` before any work is done.\n\nReplaying a key that has already been used returns the earlier request's\noutcome instead of acting twice.\n\n**A replay returns LIVE CURRENT STATE, not a frozen echo of the original\nresponse.** This is the single most important thing to understand about\nreplay on this API, and it was proven live: a create replayed after the\nbooking had been extended and then cancelled came back with\n`status: \"cancelled\"` and `total: 18`, where the original create had returned\n`status: \"active\"` and `total: 9`. The create replay branch re-reads the\nbooking and customer rows at replay time. So on a create replay,\n`status`, `total` and `access_code` describe the booking **now**;\nonly `reference` and `replayed: true` are stable facts about the original\nrequest. (`POST /extend` differs: its replay returns the stored result\nobject of the original extension, stamped `replayed: true`.)\n\nA replay of a request that was *rejected* returns the original rejection\nreason with the original status. A replay that arrives while the first\nrequest is still in flight returns `409 in_progress`.\n\n## Booking windows: two shapes, and a floor that is not where you expect\n\n**Send either `duration_minutes` or `end_time`, not both.** They are\nalternative spellings of the same window and create accepts both:\n\n* `duration_minutes` — an integer count of minutes from `start_time`. If you\n  send both fields, **`duration_minutes` wins** and `end_time` is ignored.\n* `end_time` — an ISO-8601 instant. The window is then derived from\n  `start_time` (or from now, if you omit `start_time`).\n\nOmit `start_time` to mean \"now\". `GET /availability` and `GET /quote` take\nonly `duration_minutes`, so if your UI works in end times you convert before\nyou price.\n\n**The floor is 180 minutes, not the 60 the edge function accepts.** This is\nthe single most common way a first integration fails, and it fails *late*:\nthe edge function rejects anything under 60 minutes outright, but the booking\nengine's smallest chip is **180 minutes**, so a 60–179 minute request passes\nedge validation, reaches the engine, and comes back `400 invalid` with no\nhint that duration was the problem. **If you offer sub-3-hour windows in your\nUI, they will all fail.** Above a day, the window must be a whole number of\n1440-minute blocks or it is `invalid_duration`.\n\n## Reason codes, and why they are documented per endpoint\n\nThe full reason vocabulary the code can emit is:\n\n| reason | usual status | meaning |\n|---|---|---|\n| `unauthorized` | 401, sometimes 403 | no usable key, or the partner is not active |\n| `capability` | 403 | the partner lacks the *inbound* direction capability |\n| `out_of_scope` | 403 | the location is not in this key's scope |\n| `not_permitted` | 403 | the partner is not granted this operation |\n| `not_found` | 404 | no such booking for this partner, or no such route |\n| `unavailable` | 409 | nothing free / nothing priceable for the request |\n| `in_progress` | 409 | a concurrent replay of the same Idempotency-Key |\n| `invalid_state` | 409 | the booking is not in a state this operation accepts |\n| `window_not_expired` | 409 | see the note below — **unreachable today** |\n| `invalid` | 400 | malformed or missing input |\n| `invalid_duration` | 400 | the duration is structurally wrong |\n| `period_not_allowed` | 400 | the partner's period policy forbids this window |\n| `rate_limited` | 429 | over the per-key request budget |\n| `server_error` | 500 | an internal failure; retry is reasonable |\n\n**`reason` alone does not determine the HTTP status, which is why this spec\nmodels reason→status per endpoint per branch instead of publishing one global\ntable.** The concrete case: `unauthorized` is **401** when it comes from a\nroute's own key-verification branch (the common case — no key, bad key), and\n**403** when it is returned by a wrapper RPC's *partner-not-active* branch\nand mapped by the generic reason→status mapper. The two have never been\nobserved colliding, because key verification already scopes to an active\npartner, so the 403 flavour is only reachable if a partner is deactivated in\nthe window between verification and the operation's own read. It is\nnonetheless a real branch in shipped code, and a client keyed on a single\nglobal `reason`→status table will mis-handle it. Each operation below lists\nonly the reasons that operation can actually produce, and each response says\nwhich branch produces it.\n\nTwo further notes on the enum:\n\n* **`window_not_expired` is unreachable.** It is documented here for\n  completeness of the vocabulary only. The window-expiry guard on ending a\n  booking was **deleted** in migration `20260728140000_end_booking_early.sql`,\n  whose own header records that the reason string was left in the status maps\n  deliberately, to avoid needless API churn. `POST /end` completes a live\n  booking immediately, before its window closes — proven live. It is **not**\n  listed as a response of `POST /end` anywhere in this document, and it will\n  only become reachable if that deleted guard is reinstated.\n* **`period_not_allowed` is real and was missing from the earlier written\n  accounts of this API.** `POST /bookings` returns it (as a `400`) when the\n  requested window falls outside the partner's own intraday/multiday policy.\n\n## Grant vocabulary\n\nA key's partner holds a set of granted operations. `GET /bootstrap` returns\nthem as `granted_operations`, an array of objects — `{ key, kind, label }`,\n**not** an array of bare strings. The `key` values are the grant keys, and\neach callable endpoint below names the one it requires in `x-grant-key`.\n\n| grant key | kind | endpoint |\n|---|---|---|\n| `locations` | read | `GET /bootstrap` |\n| `availability` | read | `GET /availability` |\n| `quote` | read | `GET /quote` |\n| `bookings.list` | read | `GET /bookings` |\n| `booking.read` | read | `GET /booking` |\n| `booking.create` | write | `POST /bookings` (and bare `POST /`) |\n| `booking.cancel` | write | `POST /cancel` |\n| `booking.end` | write | `POST /end` |\n| `booking.extend` | write | `POST /extend` |\n| `booking.resend_code` | write | `POST /resend-code` |\n| `booking.reissue_code` | write | `POST /reissue-code` |\n\nCalling an endpoint whose grant the partner does not hold is\n`403 not_permitted`. A grant is checked inside the operation, so a missing\ngrant is reported after authentication, never instead of it.\n\nThree further operation keys exist in the server-side registry but are **not\nbuilt** and have no endpoint: `booking.open`, `booking.add_lockers`,\n`booking.overstay`. They are listed under `x-planned-operations` at the root\nof this document so a client can recognise the strings, and they deliberately\nappear nowhere as a path. If one of them shows up in your\n`granted_operations`, there is still nothing to call.\n\n## Behaviours that surprise integrators\n\n* **Customer identity is first-write-wins by email.** Creating a booking\n  resolves the customer by email (or phone) and reuses the existing row if\n  one matches. A later create under the same email with a *different* `name`\n  does **not** update the stored name, and the response echoes the stored\n  one. Proven live: a create sending `\"E2E Rerun B\"` came back with the\n  earlier `\"E2E Rerun A\"`. Do not use the returned `customer.name` to confirm\n  what you sent.\n* **`access_code` is not always present on a create.** See the create\n  response schema — it is `string` or `null`, and the two conditions that\n  produce `null` are named there.\n* **`resend-code` and `reissue-code` do not email the customer.** They return\n  the code in the response body and nothing else leaves the platform.\n  Delivering it to the end customer is the partner's job. (`reissue-code`\n  additionally enqueues a device event so the physical keypad learns the new\n  code; until that is consumed, the OLD code still opens the door.)\n* **`GET /bookings` is capped at 100 rows, newest first, with no\n  pagination.** There is no cursor, no `offset` and no total count.\n* **Times are UTC ISO-8601 instants.** Multi-day quoting anchors on the\n  Asia/Dubai business date, which can make a multi-day quote indicative\n  rather than exact; a create charges from the real booking start.\n\n## Data handling\n\nCreating a booking sends us your customer's contact details — an email\naddress, or a phone number, and optionally a name — because a booking\nresolves to a customer record on our side and a confirmation notification is\nsent to that address. That makes both parties handlers of personal data under\nthe **UAE Personal Data Protection Law (Federal Decree-Law No. 45 of 2021)**,\nand a short data-handling understanding forms part of the partner agreement.\nAgree it before you send live traffic, not after.\n\nPractically, three rules:\n\n* **Customer data goes in the request body, over HTTPS, never in a URL.** No\n  endpoint here takes a customer identifier as a query parameter, and a URL\n  is logged in places a body is not.\n* **Send the minimum that identifies the customer.** One of `email` or\n  `phone` is required; `name` is optional and is only used for the booking\n  record.\n* **Customer identity is first-write-wins by email** — see *Behaviours that\n  surprise integrators*. The record we keep may not carry the name you sent,\n  so do not treat the echoed `customer` object as confirmation of what you\n  submitted.\n\n## About the examples\n\n**Every example in this document is illustrative.** The response examples are\nreproduced from a real end-to-end run against the dev branch project on\n2026-08-15, with every identifier, address, code and reference replaced by an\nobviously synthetic placeholder. No example contains a real customer email, a\nreal access code, a real partner key or a real booking reference. Do not\ntreat any identifier here as callable, and do not copy an example UUID into a\nrequest.\n\n\nContact Support:\n Name: CityLockers partner integrations",
       "type": "text/plain"
     }
   }

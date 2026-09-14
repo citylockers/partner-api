@@ -70,11 +70,18 @@ info:
        `POST /cancel`, `POST /end`, `POST /resend-code` and
        `POST /reissue-code`.
 
-    **There is one host and it is production.** A `test` key mode exists in the
-    data model, but the partner sandbox it refers to **has not been built**, so
-    no `test` key can currently be issued and every key you are given is `live`
-    against real lockers, real money and real customer notifications. Ask for a
-    throwaway location rather than assuming a safe environment exists.
+    **You hold two keys, and the difference is the key, not the host.** A `live`
+    key transacts against your real scoped locations: real lockers, real money,
+    real customer notifications, and a commission entry on our ledger for every
+    create and every extend. A `test` key (0.268.0) uses the **same endpoints on
+    the same host** and is scoped to a shared **fixture location** — inventory
+    that is not sold to anyone. A booking made with a test key is stamped
+    `booking_type = 'test'` (it never appears in our staff booking views) and
+    **accrues no commission**: neither its create nor any later extend writes a
+    ledger row. Everything else — availability, quote, the access code, cancel,
+    end, the idempotency contract — behaves exactly as live. Integrate against
+    the test key; go live by swapping the credential. Read which one you hold
+    from `GET /bootstrap`'s `mode` field.
 
     **Keep the key on your server.** Never put it in a browser, a mobile app, a
     URL or a repository. It is a bearer credential: whoever holds it is you.
@@ -127,10 +134,12 @@ info:
     safe to quote in a support ticket or a log line.
 
     `mode` is a property of the key itself, `live` or `test`, and is the source
-    of truth for which environment the credential belongs to. It is surfaced to
-    you on `GET /bootstrap` as the top-level `mode` field. Only `live` keys are
-    minted today; the `test` sandbox is a separate, not-yet-built partner
-    environment, so a `test` key cannot currently be issued.
+    of truth for what the credential does. It is surfaced to you on
+    `GET /bootstrap` as the top-level `mode` field. Both modes are minted
+    (0.268.0). The mode is threaded server-side from the verified key into the
+    create and extend procedures: a `test` key's bookings are stamped
+    `booking_type = 'test'` and accrue no commission; a `live` key's are
+    `standard` and do. Nothing in a request body can change a key's mode.
 
     **Legacy two-segment keys (`kpk_<8hex>_<64hex>`) no longer authenticate.**
     Verification derives the prefix from the first three segments, so a
@@ -343,6 +352,8 @@ info:
     - supabase/functions/partner-bridge/key_prefix.ts (key prefix derivation)
     - supabase/migrations/20260530070436_baseline.sql (partner.* and booking.*_via_partner RPCs)
     - supabase/migrations/20260815170000_partner_api_key_mode.sql (key mode + three-segment prefix)
+    - supabase/migrations/20260906090000_partner_test_key_spine.sql (test keys mint; p_mode threaded into create/extend)
+    - supabase/migrations/20260906100000_partner_bookings_pagination.sql (bookings filters, keyset cursor, booking_type)
     - supabase/migrations_archive/20260728140000_end_booking_early.sql (window guard deletion)
     - CC Reports/khizana/2026-08-15-partner-api-e2e-rerun.md (live observation, authoritative)
 
@@ -692,19 +703,36 @@ paths:
       operationId: listBookings
       summary: List this key's bookings
       description: |
-        Every booking this partner has created through the API, newest first,
-        **capped at 100 rows**. There is no pagination, no cursor and no total
-        count; the 101st-oldest booking is simply not returned. Each row has the
-        same object shape `GET /booking` returns for one booking.
+        The bookings this partner has created through the API, newest first,
+        **one page at a time** (0.269.0). Each row has the same object shape
+        `GET /booking` returns for one booking, and now carries `booking_type`
+        so a `test`-key booking can be told from a live one.
+
+        **Paging.** Up to `limit` rows (default and maximum 100). When more
+        remain, `has_more` is `true` and `next_cursor` is set; pass it back as
+        `cursor` to fetch the next page. The cursor is **opaque** — do not
+        parse, construct or store it beyond the next request. It is a keyset
+        over the request's creation time AND its id, so a page boundary that
+        falls between two bookings created in the same instant neither skips
+        nor repeats a row. A cursor that does not decode is `400 invalid`.
+
+        **Filters.** `status` matches the booking's lifecycle state exactly;
+        `mode=test` returns only bookings made with a test key (or by a tester
+        customer); `mode=live` returns everything else.
 
         Access codes are never included here — that is `POST /resend-code`'s job
         and it is granted separately.
       x-grant-key: bookings.list
       x-idempotency-key: not-read
+      parameters:
+        - $ref: "#/components/parameters/BookingsStatus"
+        - $ref: "#/components/parameters/BookingsMode"
+        - $ref: "#/components/parameters/BookingsLimit"
+        - $ref: "#/components/parameters/BookingsCursor"
       responses:
         "200":
-          description: The partner's bookings, newest first, at most 100.
-          x-observed: live 2026-08-15
+          description: One page of the partner's bookings, newest first.
+          x-observed: live 2026-08-15 (single page); paging proven 2026-09-06 against the dev branch
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BookingsListOk" }
@@ -715,17 +743,22 @@ paths:
                     ok: true
                     partner_id: "11111111-1111-4111-8111-111111111111"
                     bookings: []
+                    has_more: false
+                    next_cursor: null
                 populated:
                   summary: >-
                     The same response once a booking exists. The row is the
                     booking-detail object captured live on 2026-08-15,
-                    sanitised.
+                    sanitised, with booking_type added in 0.269.0.
                   value:
                     ok: true
                     partner_id: "11111111-1111-4111-8111-111111111111"
+                    has_more: false
+                    next_cursor: null
                     bookings:
                       - reference: "CL-EXAMPLE-0001"
                         status: "active"
+                        booking_type: "standard"
                         location: "Example Location"
                         start: "2026-08-15T19:32:21Z"
                         end: "2026-08-16T03:32:21Z"
@@ -733,6 +766,13 @@ paths:
                         currency: "AED"
                         sizes:
                           - { id: "33333333-3333-4333-8333-333333333333", name: "large", quantity: 1 }
+                        overstay:
+                          state: "scheduled"
+                          amount: 0
+                          currency: "AED"
+                          minutes: 0
+                          unpriced: false
+                          grace_end: "2026-08-16T03:47:21Z"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: The partner is not granted the `bookings.list` operation.
@@ -941,9 +981,11 @@ paths:
                   value: { ok: false, reason: "unauthorized" }
         "409":
           description: |
-            * `unavailable` — no wall at the location can satisfy every requested
-              size and quantity for the window, or the resolved wall carries no
-              price model, or a concurrent booking took the compartment first.
+            * `unavailable` — with `cause` (0.285.0): `no_capacity` when no wall
+              at the location can satisfy every requested size and quantity for
+              the window, `no_price_model` when the resolved wall carries no
+              price model (our gap, contact CityLockers), `conflict` when a
+              concurrent booking took the compartment first (retry).
             * `in_progress` — this Idempotency-Key is currently being processed
               by another in-flight request. Retry after a short delay; do not
               change the key.
@@ -953,7 +995,9 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorCreateConflict" }
               examples:
                 unavailable:
-                  value: { ok: false, reason: "unavailable" }
+                  value: { ok: false, reason: "unavailable", cause: "no_capacity" }
+                unavailable_no_price_model:
+                  value: { ok: false, reason: "unavailable", cause: "no_price_model" }
                 in_progress:
                   value: { ok: false, reason: "in_progress" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -968,8 +1012,8 @@ paths:
         **This is an alias of `GET /bookings`, not a separate endpoint.** The
         bare-path fallback in the dispatch is not `POST`-only: a request with no
         trailing path segment resolves to the `bookings` sub-route for **either
-        method**, so `GET /partner-bridge` returns the same list, with the same
-        grant, the same 100-row cap and the same object shape as
+        method**, so `GET /partner-bridge` returns the same page, with the same
+        grant, the same filters and cursor, and the same object shape as
         `GET /partner-bridge/bookings`.
 
         **This operation was added by the Phase 4a drift guard**, which compared
@@ -982,6 +1026,11 @@ paths:
       x-grant-key: bookings.list
       x-idempotency-key: not-read
       x-alias-of: "GET /bookings"
+      parameters:
+        - $ref: "#/components/parameters/BookingsStatus"
+        - $ref: "#/components/parameters/BookingsMode"
+        - $ref: "#/components/parameters/BookingsLimit"
+        - $ref: "#/components/parameters/BookingsCursor"
       responses:
         "200":
           description: As `GET /bookings`.
@@ -993,6 +1042,8 @@ paths:
                 ok: true
                 partner_id: "11111111-1111-4111-8111-111111111111"
                 bookings: []
+                has_more: false
+                next_cursor: null
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: As `GET /bookings`.
@@ -1135,6 +1186,13 @@ paths:
                       currency: "AED"
                       sizes:
                         - { id: "33333333-3333-4333-8333-333333333333", name: "large", quantity: 1 }
+                      overstay:
+                        state: "overdue"
+                        amount: 4
+                        currency: "AED"
+                        minutes: 37
+                        unpriced: false
+                        grace_end: "2026-08-16T03:47:21Z"
         "400":
           description: "`invalid` — the `reference` query parameter is missing or blank."
           x-observed: not observed live
@@ -1597,17 +1655,52 @@ components:
         whole key.
 
         **Mode** is a property of the key, not of the request. `live` keys
-        operate on production data; `test` keys will operate on a sandbox
-        partner that does not exist yet, so no `test` key can currently be
-        minted. Read the mode of the key you hold from `GET /bootstrap`'s `mode`
-        field rather than parsing the string yourself, and treat the two hosts
-        under `servers` as separate worlds: a key issued on one never
-        authenticates on the other.
+        operate on your real scoped locations and accrue commission; `test` keys
+        (0.268.0) are scoped to a shared fixture location, stamp their bookings
+        `booking_type = 'test'` and accrue no commission — on the same host,
+        through the same endpoints. Read the mode of the key you hold from
+        `GET /bootstrap`'s `mode` field rather than parsing the string yourself,
+        and treat the two hosts under `servers` as separate worlds: a key issued
+        on one never authenticates on the other.
 
         Legacy three-segment keys (`kpk_<8hex>_<64hex>`, no mode) no longer
         authenticate at all and are rejected as `unauthorized`.
 
   parameters:
+    BookingsStatus:
+      name: status
+      in: query
+      required: false
+      description: Only bookings in exactly this lifecycle state.
+      schema: { $ref: "#/components/schemas/BookingStatus" }
+      # An explicit example, because the Postman converter otherwise picks a RANDOM enum member
+      # per run and the generated collection stops being deterministic (spec:postman refuses).
+      example: active
+    BookingsMode:
+      name: mode
+      in: query
+      required: false
+      description: >-
+        `test` — only bookings stamped `booking_type: test` (made with a test key, or by a
+        tester customer). `live` — everything else. Omit for both.
+      schema: { type: string, enum: [test, live] }
+      example: test
+    BookingsLimit:
+      name: limit
+      in: query
+      required: false
+      description: Page size, 1–100. Default 100.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      example: 50
+    BookingsCursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        The `next_cursor` of the previous page, verbatim. Opaque; a value that does not
+        decode is refused `400 invalid`.
+      schema: { type: string }
+      example: MjAyNi0wOS0wNiAxMDowMDowMCswMHxlMjY5MDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDA=
     IdempotencyKeyRequired:
       name: Idempotency-Key
       in: header
@@ -1891,6 +1984,19 @@ components:
             reason:
               type: string
               const: unavailable
+            cause:
+              type: string
+              enum: [no_capacity, no_price_model, conflict]
+              description: >-
+                Why (0.285.0), on `POST /bookings` only. `no_capacity` — no
+                deployed wall at the location has enough free, in-service,
+                bookable compartments of every requested size for the window
+                (change the request). `no_price_model` — the resolved wall has
+                no price model attached: our configuration gap, not your
+                request (contact CityLockers). `conflict` — a concurrent booking
+                took the compartment between the availability check and the
+                insert (retry). A replay with the same Idempotency-Key repeats
+                the original cause. Absent on every other refusal.
     ErrorRateLimited:
       allOf:
         - $ref: "#/components/schemas/Error"
@@ -1949,6 +2055,12 @@ components:
             reason:
               type: string
               enum: [unavailable, in_progress]
+            cause:
+              type: string
+              enum: [no_capacity, no_price_model, conflict]
+              description: >-
+                Present with `unavailable` only (0.285.0) — see ErrorUnavailable
+                for what each value asks of you.
     ErrorExtendBadRequest:
       allOf:
         - $ref: "#/components/schemas/Error"
@@ -2004,9 +2116,14 @@ components:
         intraday_durations:
           type: array
           description: >-
-            The bookable sub-day durations, in minutes, drawn from the live rate
-            card. **May be empty** — an empty array does not mean intraday is
-            forbidden, it means no sub-day tier is currently published. Read
+            The bookable sub-day durations, in minutes, read from the price
+            models attached to the deployed walls at your scoped locations —
+            the same source the create path prices from (0.282.0). A duration
+            is listed when at least one wall in your scope prices at least one
+            size at it; pricing is still per wall and per size, so a listed
+            duration can be refused for a particular size. **May be empty** —
+            an empty array does not mean intraday is forbidden, it means no
+            wall in your scope currently prices a sub-day tier. Read
             `allow_intraday` for permission.
           items: { type: integer }
       additionalProperties: true
@@ -2081,7 +2198,8 @@ components:
             The mode of the key that authenticated this request. Added by the
             API gateway from the verified key's own record — the underlying
             procedure does not know which key was presented and never returns
-            this field.
+            this field. `test` (0.268.0): the locations listed are fixture
+            inventory, bookings are stamped `test` and no commission accrues.
       additionalProperties: true
     AvailabilitySize:
       type: object
@@ -2274,10 +2392,17 @@ components:
       description: >-
         One booking, in the single shape shared by the list and the detail
         endpoints. No access code and no customer are included.
-      required: [reference, status, location, start, end, total, currency, sizes]
+      required: [reference, status, booking_type, location, start, end, total, currency, sizes, overstay]
       properties:
         reference: { $ref: "#/components/schemas/BookingReference" }
         status: { $ref: "#/components/schemas/BookingStatus" }
+        booking_type:
+          type: string
+          enum: [standard, test]
+          description: >-
+            `test` for a booking made with a test key (0.268.0) or by a tester customer;
+            `standard` otherwise. Test bookings accrue no commission and never appear in
+            staff booking views. Added 0.269.0.
         location:
           type: string
           description: The location's display name. Not its id.
@@ -2294,18 +2419,64 @@ components:
         sizes:
           type: array
           items: { $ref: "#/components/schemas/BookingSize" }
+        overstay: { $ref: "#/components/schemas/BookingOverstay" }
+      additionalProperties: true
+    BookingOverstay:
+      type: object
+      description: >-
+        The overstay owed on this booking RIGHT NOW (0.283.0), from the same
+        computation the kiosk uses. A `counterparty_collects` partner's customer
+        who overstays is sent to the partner to settle; this is the figure to
+        settle. Read it at the moment you need it — it grows while the
+        compartment stays occupied.
+      required: [state, amount, currency, minutes, unpriced, grace_end]
+      properties:
+        state:
+          type: string
+          description: >-
+            For an active booking: `scheduled` (inside the window), `grace`
+            (past `end`, inside the free grace), `overdue` (owed), or
+            `clear_due` (the clear deadline has passed). For any other booking
+            its own status (`completed`, `cancelled`, …). `unscheduled` when the
+            booking never activated.
+        amount:
+          type: [number, "null"]
+          description: >-
+            Owed now, in `currency`. `0` when nothing is owed. `null` when a
+            compartment's size has no overstay rate — see `unpriced`. Null is
+            "cannot be priced", not zero; do not render it as zero.
+        currency: { $ref: "#/components/schemas/Currency" }
+        minutes:
+          type: integer
+          minimum: 0
+          description: Whole minutes past the end of grace; 0 until then.
+        unpriced:
+          type: boolean
+          description: True when at least one compartment's size carries no overstay rate.
+        grace_end:
+          oneOf: [{ $ref: "#/components/schemas/Instant" }, { type: "null" }]
+          description: When the free grace after `end` runs out; null when unscheduled.
       additionalProperties: true
     BookingsListOk:
       type: object
-      required: [ok, partner_id, bookings]
+      required: [ok, partner_id, bookings, has_more, next_cursor]
       properties:
         ok: { type: boolean, const: true }
         partner_id: { type: string, format: uuid }
         bookings:
           type: array
           maxItems: 100
-          description: Newest first, hard-capped at 100 with no pagination.
+          description: One page, newest first, at most `limit` rows.
           items: { $ref: "#/components/schemas/Booking" }
+        has_more:
+          type: boolean
+          description: True when a further page exists; then `next_cursor` is set.
+        next_cursor:
+          type: [string, "null"]
+          description: >-
+            Opaque cursor for the next page, or null on the last page. Pass back as
+            `cursor`. Keyset over (creation time, id), so a tie on creation time never
+            skips or repeats a row.
       additionalProperties: true
     BookingDetailOk:
       type: object

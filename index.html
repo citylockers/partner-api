@@ -110,11 +110,18 @@ exists, the customer&#39;s <code>access_code</code>.</li>
 <code>POST /cancel</code>, <code>POST /end</code>, <code>POST /resend-code</code> and
 <code>POST /reissue-code</code>.</li>
 </ol>
-<p><strong>There is one host and it is production.</strong> A <code>test</code> key mode exists in the
-data model, but the partner sandbox it refers to <strong>has not been built</strong>, so
-no <code>test</code> key can currently be issued and every key you are given is <code>live</code>
-against real lockers, real money and real customer notifications. Ask for a
-throwaway location rather than assuming a safe environment exists.</p>
+<p><strong>You hold two keys, and the difference is the key, not the host.</strong> A <code>live</code>
+key transacts against your real scoped locations: real lockers, real money,
+real customer notifications, and a commission entry on our ledger for every
+create and every extend. A <code>test</code> key (0.268.0) uses the <strong>same endpoints on
+the same host</strong> and is scoped to a shared <strong>fixture location</strong> — inventory
+that is not sold to anyone. A booking made with a test key is stamped
+<code>booking_type = &#39;test&#39;</code> (it never appears in our staff booking views) and
+<strong>accrues no commission</strong>: neither its create nor any later extend writes a
+ledger row. Everything else — availability, quote, the access code, cancel,
+end, the idempotency contract — behaves exactly as live. Integrate against
+the test key; go live by swapping the credential. Read which one you hold
+from <code>GET /bootstrap</code>&#39;s <code>mode</code> field.</p>
 <p><strong>Keep the key on your server.</strong> Never put it in a browser, a mobile app, a
 URL or a repository. It is a bearer credential: whoever holds it is you.</p>
     </section>

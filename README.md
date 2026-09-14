@@ -72,11 +72,18 @@ delivered as a bare HTTP status with an empty body.
    `POST /cancel`, `POST /end`, `POST /resend-code` and
    `POST /reissue-code`.
 
-**There is one host and it is production.** A `test` key mode exists in the
-data model, but the partner sandbox it refers to **has not been built**, so
-no `test` key can currently be issued and every key you are given is `live`
-against real lockers, real money and real customer notifications. Ask for a
-throwaway location rather than assuming a safe environment exists.
+**You hold two keys, and the difference is the key, not the host.** A `live`
+key transacts against your real scoped locations: real lockers, real money,
+real customer notifications, and a commission entry on our ledger for every
+create and every extend. A `test` key (0.268.0) uses the **same endpoints on
+the same host** and is scoped to a shared **fixture location** — inventory
+that is not sold to anyone. A booking made with a test key is stamped
+`booking_type = 'test'` (it never appears in our staff booking views) and
+**accrues no commission**: neither its create nor any later extend writes a
+ledger row. Everything else — availability, quote, the access code, cancel,
+end, the idempotency contract — behaves exactly as live. Integrate against
+the test key; go live by swapping the credential. Read which one you hold
+from `GET /bootstrap`'s `mode` field.
 
 **Keep the key on your server.** Never put it in a browser, a mobile app, a
 URL or a repository. It is a bearer credential: whoever holds it is you.
@@ -129,10 +136,12 @@ hash of the full key, what the rate limiter buckets on, and the only part
 safe to quote in a support ticket or a log line.
 
 `mode` is a property of the key itself, `live` or `test`, and is the source
-of truth for which environment the credential belongs to. It is surfaced to
-you on `GET /bootstrap` as the top-level `mode` field. Only `live` keys are
-minted today; the `test` sandbox is a separate, not-yet-built partner
-environment, so a `test` key cannot currently be issued.
+of truth for what the credential does. It is surfaced to you on
+`GET /bootstrap` as the top-level `mode` field. Both modes are minted
+(0.268.0). The mode is threaded server-side from the verified key into the
+create and extend procedures: a `test` key's bookings are stamped
+`booking_type = 'test'` and accrue no commission; a `live` key's are
+`standard` and do. Nothing in a request body can change a key's mode.
 
 **Legacy two-segment keys (`kpk_<8hex>_<64hex>`) no longer authenticate.**
 Verification derives the prefix from the first three segments, so a
