@@ -2639,8 +2639,8 @@
               "_postman_previewlanguage": "json"
             },
             {
-              "id": "6e0278d9-7897-5063-b468-7091c569287d",
-              "name": "`invalid_state` — the booking is neither `pending` nor `active`; it has already been cancelled, completed or expired.",
+              "id": "5289f594-8544-550b-a797-ccde4bb0788a",
+              "name": "`invalid_state` — the booking is neither `pending` nor `active`; it has already been cancelled, completed, or was never paid for.",
               "originalRequest": {
                 "url": {
                   "path": [

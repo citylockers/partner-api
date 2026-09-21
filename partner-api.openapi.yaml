@@ -1275,7 +1275,7 @@ paths:
         "409":
           description: >-
             `invalid_state` — the booking is neither `pending` nor `active`; it
-            has already been cancelled, completed or expired.
+            has already been cancelled, completed, or was never paid for.
           x-observed: not observed live
           content:
             application/json:
@@ -1830,10 +1830,27 @@ components:
         * `pending` — created, awaiting payment (a `we_collect` partner). No
           access code yet.
         * `active` — paid or settled, the locker is held and usable.
-        * `cancelled` — cancelled; the locker is released, no refund.
+        * `cancelled` — cancelled by someone: the customer or an agent acted. The
+          locker is released, no refund.
         * `completed` — ended; the locker is released.
-        * `expired` — the window ran out without the booking being closed.
-      enum: [pending, active, cancelled, completed, expired]
+        * `incomplete` — never paid for. The hold lapsed and the locker was
+          released without anyone cancelling it. Distinct from `cancelled`,
+          which always means a person decided; nobody decided this one.
+
+        `status` is also accepted as a filter on `GET /bookings`, where it
+        matches this value exactly. A filter on `cancelled` therefore no longer
+        returns bookings that were merely never paid for — those are
+        `incomplete`.
+
+        `expired` was published here until 2026-09-15 and is **removed**. No
+        booking was ever returned carrying it: nothing in the database has ever
+        written that value, so a partner handling it had unreachable code and a
+        partner waiting for it waited forever. It is not re-homed on a status
+        column — "the window ran out" is already tracked in the booking
+        lifecycle, and storing it twice is how two sources of one fact drift
+        apart. Should it ever be published again it will be derived at this
+        boundary from that lifecycle state, not stored alongside it.
+      enum: [pending, active, cancelled, completed, incomplete]
     AccessCode:
       type: string
       pattern: "^[0-9]{6}$"
