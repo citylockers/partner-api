@@ -308,8 +308,11 @@ appear nowhere as a path. If one of them shows up in your
   Delivering it to the end customer is the partner's job. (`reissue-code`
   additionally enqueues a device event so the physical keypad learns the new
   code; until that is consumed, the OLD code still opens the door.)
-* **`GET /bookings` is capped at 100 rows, newest first, with no
-  pagination.** There is no cursor, no `offset` and no total count.
+* **`GET /bookings` pages with a cursor.** Up to `limit` rows per page
+  (default and maximum 100), newest first; pass the previous page's
+  `next_cursor` back as `cursor` to continue, and stop when `has_more` is
+  `false`. There is no `offset` and no total count. See `GET /bookings`
+  above for the `status` and `mode` filters.
 * **Times are UTC ISO-8601 instants.** Multi-day quoting anchors on the
   Asia/Dubai business date, which can make a multi-day quote indicative
   rather than exact; a create charges from the real booking start.
@@ -336,6 +339,52 @@ Practically, three rules:
   surprise integrators*. The record we keep may not carry the name you sent,
   so do not treat the echoed `customer` object as confirmation of what you
   submitted.
+
+## Catalogue, hours, overstay and extension
+
+* **Sizes are identified by `id`, not by name.** `name` is a stable internal
+  code (e.g. `medium_residential`); it does not change once assigned.
+  `friendly_name` is a display label, and two different `id`s can carry the
+  same `friendly_name` — different sites use the same label for physically
+  different compartments. Build your UI to key on `id`; use `friendly_name`
+  only for display. `height_mm`, `width_mm` and `depth_mm` are the internal
+  compartment dimensions in millimetres, each independently `null` where
+  that measurement has not been published for the size.
+* **Opening hours are free text, and `null` means unknown.** See the
+  `opening_hours` field on the `Location` schema for the full contract.
+  `null` is not "closed" and is not "24/7" — it means CityLockers has not
+  published hours for that location, and your UI should say so rather than
+  guess.
+* **A booking's overstay state carries its own `grace_end`.** The booking
+  detail read (`GET /booking?reference=`) returns the booking's `end`,
+  `status`, and an `overstay` object. Read `grace_end` from that object
+  rather than assuming a fixed grace period — it depends on the price model
+  attached to the wall the booking is on, and a wall with no overstay
+  policy configured returns `grace_end: null` and an `unscheduled` state.
+  Whether and after how long a booking becomes eligible for removal is
+  configured per price model and is not uniform across the fleet; read the
+  state on each booking rather than hard-coding a duration.
+* **CityLockers does not take payment from a `counterparty_collects`
+  partner's customer for overstay or extension.** Every CityLockers-side
+  payment rail for overstay and extension that exists today — the kiosk, a
+  QR checkout and a terminal charge — refuses to charge when the booking's
+  partner has elected to collect payment itself; the quote surfaces still
+  answer, with the amount and `payable_here: false`, so your own product
+  can charge and settle without a double charge. The customer app has no
+  overstay or extension payment capability of its own today, so there is
+  nothing on that surface to charge or refuse.
+* **`POST /extend` moves the booking's end and its overstay clock
+  together.** Send `{reference, extend_minutes}` with an `Idempotency-Key`
+  header — it is required, and a request without one is refused. The RPC
+  adds `extend_minutes` to the booking's current end and recomputes the
+  overstay state from the new end; it does not simply clear an overdue
+  state, so an extension that does not move the end far enough forward can
+  leave the booking overdue. Take payment on your own side before or after
+  calling this — CityLockers does not charge your customer for the
+  extension itself.
+* **There are no webhooks today.** Nothing here pushes a booking's status
+  to you. The booking detail read is the way to follow a booking: poll it,
+  or read it in response to your own customer's action.
 
 ## About the examples
 
