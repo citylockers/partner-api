@@ -1437,12 +1437,21 @@ paths:
         **Each extension accrues its own commission entry.** An extension does
         not amend the booking's original accrual, it adds a second one.
 
-        `extend_minutes` must be an integer of at least **180** (3 hours) and at
-        most 365 days; the resulting end must also stay within 366 days of now.
-        A duration of 180 or more that the pricing engine still cannot sell for
-        this size (not a chip duration or whole days) is refused the same way —
+        `extend_minutes` must be an integer of at least the booking's price
+        model's **minimum period** (its shortest sellable block: 3 hours for
+        luggage, 8 hours for scooter, 24 hours for beach) and at most 365 days;
+        the resulting end must also stay within 366 days of now. A duration at
+        or above the minimum that the pricing engine still cannot sell for this
+        size (not a block duration or whole days) is refused the same way —
         `400 invalid_duration` — not a 500. See the `400` response below for the
-        full refusal range.
+        full refusal range. (Until 2026-09-26 the floor was a fixed 180
+        minutes; it now comes from the model.)
+
+        An extension is recorded as a new booking attached to the original, on
+        the same compartment, keeping the same access code. Your `reference`
+        keeps naming the whole stay: `GET /booking` and this response report the
+        stay's current `status`, its latest `end` and its `total` across the
+        original and every extension.
 
         Fixed 2026-08-16 (previously this range 500'd; see CHANGELOG). The value
         to send is a duration the size actually prices — read them from the
@@ -1493,11 +1502,12 @@ paths:
               body is read, but after the key is verified), malformed JSON body,
               missing `reference`, or `extend_minutes` absent, non-integer or
               below 1 (edge-level shape check).
-            * `invalid_duration` — `extend_minutes` **below 180** (the 3-hour
-              floor), above 365 days, a new end beyond 366 days from now, or a
-              duration of 180 or more that the pricing engine cannot sell for
-              this size (not a chip duration or whole days for it). All four
-              cases return this same clean `400`, never a 500.
+            * `invalid_duration` — `extend_minutes` **below the price model's
+              minimum period** (never below 60), above 365 days, a new end
+              beyond 366 days from now, or a duration at or above the minimum
+              that the pricing engine cannot sell for this size (not a block
+              duration or whole days for it). All four cases return this same
+              clean `400`, never a 500.
           x-observed: "invalid_duration observed live 2026-08-16 at extend_minutes 1 and 59 (the pre-existing range); container-proven 2026-08-16 at 60, 90, 179, 181 and 200 (the fixed range)"
           content:
             application/json:
@@ -2542,7 +2552,10 @@ components:
         minutes:
           type: integer
           minimum: 0
-          description: Whole minutes past the end of grace; 0 until then.
+          description: >-
+            Whole minutes past the booking's END, counted from the end itself
+            once the 15-minute grace has passed; 0 until then. (Until
+            2026-09-26 this counted from the end of grace.)
         unpriced:
           type: boolean
           description: True when at least one compartment's size carries no overstay rate.
